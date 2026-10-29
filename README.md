@@ -1,395 +1,113 @@
 # KsuFastSurfing
 
-KernelSU / Magisk 模块：**WiFi 诊断** + **本机测速的 hosts 加速** + **可配置 WiFi 国家码**。
-纯脚本 + 网页，不写真实分区，卸载即恢复。
+**KernelSU / Magisk 模块：WiFi 诊断 · 本机实测的 hosts 加速 · 可配置 WiFi 国家码。**
 
-`Android 8+` · `KernelSU` · `Magisk` · `systemless`
+纯脚本 + WebUI，systemless：不写真实分区，卸载即恢复。
+
+`Android 8+`（`cmd wifi` 相关功能需 Android 10+）· `KernelSU` · `Magisk`
 
 ---
 
 ## 它解决什么
 
 1. **5GHz 信道用不上** —— 设备按错误的监管域工作，149-165 与 DFS 信道被屏蔽，路由器在广播却扫不到。
-2. **hosts 加速** —— `github.com`、`mtalk.google.com` 等域名解析到劣质 IP。模块在**本机**测哪些 IP
-   真的能握手，而不是信任别人预置的清单。
-3. **诊不明** —— 信号满格却上不了网时，分不清是信号弱、AP 上行烂、还是 DNS 坏了。
+2. **hosts 加速靠玄学** —— 公共 hosts 里的 IP 对别人快、对你未必。本模块在**本机**逐个测哪些 IP
+   真的能完成 TLS 握手，再把最快的一个写进 hosts。
+3. **信号满格却上不了网** —— 分不清是信号弱、AP 上行烂，还是 DNS 坏了。
 
-三件事共用同一套挂载、日志、卸载逻辑，所以放在一个模块里。
+三件事共用同一套挂载、日志与卸载逻辑，所以放在一个模块里。
 
-### 为什么用 bind mount 而不是只放 system 目录
+## 功能
 
-KernelSU 把 `/system` 挂载交给 metamodule（如 meta-overlayfs）。**只放 `module/system/etc/hosts`，
-用户没装 metamodule 就完全不生效** —— 这是自己写 hosts 模块后“刷了没反应”的常见原因。
+### WiFi 诊断
 
-所以主路径是在 `post-fs-data` 阶段 bind mount；`module/system/etc/hosts` 作为装了 metamodule 时的备份。
-两条路喂同一份内容。
+- 当前链路：SSID、频率 / 信道、速率、RSSI、Wi-Fi 标准
+- 周边频谱：全部 AP 按网络名分组，同名多射频并排列出 BSSID / 信道 / 频率 / RSSI / 类型
+- 信道建议：按线性功率加权的干扰分数，5GHz 优先、DFS 靠后
+- DFS 可见性：UNII-2A / 2C / 3 分带计数，判断 ch100-144 是“扫不到”还是“UI 不显示”
+- 链路质量：网关、丢包、RTT、DNS 解析，一次区分无线问题和上行问题
+- 硬件能力：`survey` / 监听 / 注入三项由设备自己回答，不按机型猜
 
----
+数据来自 `cmd wifi`、`dumpsys`、`ip route`、`ping` 与 `/proc` / `/sys`，**不依赖 `iw`**（零售 ROM 通常没有）。
 
-## 设计思路
+### hosts 加速
 
-### 开机不做任何检测
+- 域名列表在 `module/domains`，一行一个，可自行增删
+- 解析走短路链：`ping` → `getent` / `nslookup` → DoH（Cloudflare → Google），拿到即停
+- 可达性看 `time_connect` 与 TLS 握手，不看 HTTP 状态码；403 同样证明链路是通的
+- 每个域名留最快的一个 IP，结果**只追加到编辑框**，用户确认后按「保存并应用」才生效
+- 没有云端预置源，没有后台探测，没有“自动优化”
 
-`post-fs-data` 是阻塞式的，KernelSU 给 10 秒预算，联网会拖慢启动甚至触发看门狗。
+### WiFi 国家码
 
-| 阶段 | 行为 | 联网 |
-|---|---|---|
-| `post-fs-data.sh` | 合并 `user-hosts` → 注入国家码属性 → 挂载 | 否 |
-| WebUI「检测 IP」 | 用户点击后才测速，只读 | 是 |
+- 开机注入 `ro.boot.wificountrycode` 等属性，供框架 / 厂商 HAL 初始化时读取
+- 应用国家码时调用 `cmd wifi force-country-code`，覆盖 Android 10+ 的运行时接口
+- 对高通平台尝试 overlay `/vendor/etc/wifi/WCNSS_qcom_cfg.ini` 的 `gStaCountryCode`
+- 四层约束（framework / regdb / 驱动 / 射频）在 WebUI 与 `diagnose` 中分开呈现
 
-模块没有 `service.sh`：开机不会自动探测、不会自动改写 hosts、不会在后台发起任何请求。
-宿主的每一行内容都来自用户按下的那一次「保存并应用」。
+## 界面
 
-### 只有一个来源：user-hosts
+| 选项卡 | 内容 |
+|---|---|
+| 概览 | 当前链路、周边 AP 数、建议信道、网关 / 丢包 / DNS |
+| 信道 | 按 SSID 分组的 AP 明细、DFS 分带、硬件能力 |
+| hosts | 条目数 / 挂载状态、检测日志、hosts 编辑框、单按钮保存 |
+| 国家码 | 期望值 / 当前值、应用与恢复自动 |
 
-```
-user-hosts  →  hosts  →  /system/etc/hosts
-```
-
-没有第二层、没有 `USE_PROBED` 开关、没有“探测结果自动生效”。检测的输出先追加到
-编辑框，用户看过、改过、按下保存，才会写文件。合并时同名域名只保留第一条（去重），
-所以文件里不会出现两行同名。
-
-### 国家码双通道
-
-只在开机后跑 `cmd wifi force-country-code` 不够——WiFi 服务初始化时读的是属性。
-
-| 通道 | 时机 | 作用 |
-|---|---|---|
-| `ro.boot.wificountrycode` 等属性 | 开机 | 框架 / 厂商 HAL 初始化时读 |
-| `cmd wifi force-country-code enabled XX` | 开机后 | Android 10+ 官方运行时接口 |
-
-两者由 `config` 的 `CC=` 驱动，`set-cc` 时同步写入。
-
-### 手动输入走 base64
-
-文本框内容落到文件时如果拼 shell 字符串，用户输入里的引号、制表符、中文都能让拼接出错。
-改为 `btoa` → `base64 -d`，字节能原样穿过 shell。
-
-### 所有状态可查，所有操作可重入
-
-`manager.sh` 是唯一控制面，`post-fs-data` / `action` / 命令行都只是调它。
-任何时刻都能手动跑一次把状态修正，不必重启。
-
----
-
-## WebUI
-
-页面只用**一次** `ksu.exec` 取回全部数据：`collect.sh` 把扫描、链路、路由、ping
-和（必要时）supplicant 表分段打印，页面按段解析。
-
-```
-##scan   cmd wifi list-scan-results
-##link   cmd wifi status
-##route  ip route
-##ping   网关 3 包
-##dns    一次外网解析
-##mac    wpa_cli scan_results（只有出现脱敏 BSSID 时才读）
-```
-
-早前是每个数据源一次 `exec`，一次刷新 8-11 次桥往返，最后一个返回前页面不显示任何数字。
-
-这样不依赖设备上的 `awk`，也没有中间文件需要同步，屏幕上是刚测到的数据。
-（曾经有一套 `wifidiag.awk` + `jsonlib.awk` 的命令行管线，因 Android 的 awk 缺
-`strftime` 和数学函数，每加一个功能都要绕着这两个缺口改写，现已移除。）
-
-### 界面
-
-- 配色与背景交给 KernelSU，页面不设 `color-scheme` 也不设背景色，跟随管理器主题
-- 底部**全局状态条**：任何选项卡的操作都反馈在这里（运行中带进度条、完成/失败带颜色）
-- 四个选项卡：概览 / 信道 / hosts / 国家码
-
-### 数据解析的硬约束
-
-SSID 是邻居路由器起的名字，**可以包含 `|`、`=`、引号、反斜杠、空格**。
-**永远不要**用分隔符拼接再拆分字段：实测一个 `ap fake=1|2` 会被解析成
-`freq=2, ch=5745, rssi=149`——数字全错，页面照常显示，不报错。
-
-正确做法（已实现）：SSID 取「age 列之后到第一个 `[` 之前」的整段文本。
-SSID 进 DOM 前必须走 `esc()`，否则 `<img src=x onerror=...>` 这类名字会在 WebView 里执行。
-
-### Channel 推荐的两条排序规则
-
-1. **5GHz 整体排在 2.4GHz 之前**。2.4GHz 只有三个不重叠信道且被周围所有设备共享。
-2. **DFS 排在所有非 DFS 之后**，哪怕分数为 0。空 DFS 信道只能被动扫描、会被雷达驱逐，
-   是最差的建议。只按负载排序时，实测数据上的答案恒为 `ch 108`（空 DFS）——算术没错，建议无用。
-
-干扰分数：RSSI 换算成线性功率后求和，同信道全权重、±4 邻道 1/4。
-候选信道只能来自标准栅格 + 实际观测到的信道——±4 扩散会产出 ch45/46/50 这类不存在的信道。
-
-### 动作结束不再偷偷全量刷新
-
-`busy()` 只负责禁用按钮和兜底异常，**不在 finally 里重读数据**。每个动作自己决定要刷新什么：
-保存后只读 `status`，扫描后只读一次 `collect.sh`，检测完成后什么都不读。
-早前是每个按钮结束都跑一遍完整刷新，等于用户看不到的第二次等待。
-启动流程有 `userActed` 守卫，用户点过按钮后就不再输出「就绪」。
-
----
+页面配色与背景交给 KernelSU，不强制主题；所有操作反馈在底部全局状态条。
 
 ## 安装
 
-1. 下载 `KsuFastSurfing-vX.Y.zip`
-2. KernelSU 管理器 → 模块 → 从本地安装
+1. 从 [Releases](https://github.com/Kreedb/KsuFastSurfing/releases) 下载 `KsuFastSurfing-vX.Y.zip`，
+   或自行 `./build.sh` 构建
+2. KernelSU / Magisk 管理器 → 模块 → 从本地安装
 3. 重启
 
-Magisk 同样适用（`cmd wifi` 需要 Android 10+）。
+首次安装后 `user-hosts` 为空，hosts 只有 localhost；需要加速时打开 WebUI 检测一次并保存。
 
-## 使用
+## 快速开始
 
-模块详情页 → 打开 WebUI。
+- **看信号**：概览页直接读当前链路；「重新扫描」等待新结果落地，状态条会说明是否真的更新
+- **配 hosts**：hosts 页 → 「检测 IP」→ 看日志与追加结果 → 确认 / 修改 → 「保存并应用」
+- **改国家码**：国家码页输入两位码 → 「应用」；「恢复自动」交还系统
+- **查 DFS**：信道页看 UNII-2C 计数；为 0 时用 `manager.sh diagnose` 看是哪一层挡住
 
-- **概览**：当前链路（频率/信道/速率/信号）、周边频谱、建议信道、网关与 DNS
-- **信道**：全部 AP 按网络名分组（名称居中，下面逐行列出该名称的每个射频的 BSSID / 信道 / 频率 / RSSI / 类型），同名多射频一眼可见；另有 DFS 分带（UNII-2A / 2C / 3）
-- **hosts**：条目数 / 挂载状态；「检测 IP」把可用地址**追加到编辑框**，日志同屏滚动；
-  「保存并应用」是唯一会写文件并挂载的按钮
-- **国家码**：两位码点「应用」；「恢复自动」交还系统
-
-命令行：
+## 常用命令
 
 ```sh
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh status'
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'      # 国家码四层诊断
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh apply'         # 合并 user-hosts 并挂载
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh apply'       # 合并 user-hosts 并挂载
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh set-cc JP'
-su -c 'sh /data/adb/modules/KsuFastSurfing/collect.sh'               # 一次取回全部数据
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'    # 国家码四层诊断
+su -c 'sh /data/adb/modules/KsuFastSurfing/collect.sh'             # 一次取回全部诊断数据
 ```
 
-## 配置
+## 设计原则
 
-`module/config`：
+- **开机不联网**：`post-fs-data` 只做本地合并、属性注入与挂载，10 秒预算内完成
+- **检测只读**：`probe.sh` 只输出结果和日志，不改 hosts、不 apply
+- **单一来源**：`user-hosts` 是唯一输入，合并时同名域名只保留第一条
+- **不编造数据**：拿不到就显示“未获取 / 未知”，不用 0 或猜测填充
 
-```
-CC=US            # WiFi 国家码，两位字母
-PROBE_TIMEOUT=3  # 单次 TLS 握手超时（秒），1-10
-PROBE_THREADS=8  # 并发探测数，1-16
-```
+## 文档
 
-探测的域名列表在 `module/domains`，一行一个，`#` 注释。加域名不必改脚本。
-
-候选 IP 的来源是一条**短路链**：`ping` 自身的解析（零售 ROM 一定有）、`getent`/`nslookup`
-（如果 ROM 带了）、最后才是两个 DoH 端点（Cloudflare → Google，前一个没结果才问下一个）。
-拿到地址就停，不再为一个已经有答案的域名多花 2-4 秒。
-可达性以 `time_connect` 判定，而不是 `curl` 的退出码——返回 403 或 TLS 失败的站点同样
-证明链路是通的。排序先看 TLS 握手是否完成，再看连接耗时，每个域名留最快的一个。
-
-BSSID 在 Android 12+ 由框架脱敏成 `68:19:**:**:37:c3`（第 3、4 段被抹）。
-页面跑在 root 下，会读 `wpa_supplicant` 的 `scan_results` 拿完整地址，用残存的
-前两段与后两段做匹配——这两段基本唯一，RSSI 只用于同频同前缀时的取舍。
-拿不到 `wpa_cli` 就保留脱敏值，不编造。
-
-## WiFi 诊断
-
-| 指标 | 说明 |
+| 文档 | 内容 |
 |---|---|
-| 周边 AP | 频率、信道、RSSI、安全类型 |
-| 连接链路 | 当前 SSID 的真实频率/速率/信号 |
-| DFS 可见性 | ch100-144 的 AP 数，判断能否用 ch100 的硬证据 |
-| 干扰评分 | 线性功率加权，同信道全权重、±4 邻道 1/4 |
-| 扫描新鲜度 | 结果的 `Age` 列，框架会复用缓存 |
-| 网关 / 丢包 / RTT | 区分「信号弱」与「AP 上行差」 |
-| DNS / 出网 | 一次 lookup 同时验证解析与可达 |
-| 多 BSSID | 同 SSID 的 BSSID 数，判断 mesh / 漫游 |
+| [docs/HANDOFF.md](docs/HANDOFF.md) | **接续开发先读**：当前状态、硬约束、验证结果、待办 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 运行架构、生命周期、控制面、文件职责 |
+| [docs/WEBUI.md](docs/WEBUI.md) | 桥接协议、页面数据流、交互纪律、打包方式 |
+| [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) | 扫描解析、信道 / DFS、干扰评分、L3、MAC 恢复 |
+| [docs/HOSTS.md](docs/HOSTS.md) | 探测链、日志格式、去重规则、保存流程 |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 构建、测试、脚本规范、Android 坑、发布纪律 |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 按现象排查：挂载、探测、MAC、国家码、页面 |
+| [docs/README.md](docs/README.md) | 文档索引与推荐阅读顺序 |
 
-### 为什么不用 `iw`
+## 兼容性
 
-零售机型的 Android **不预装 `iw`**（荣耀 MagicOS 实测没有）。用 `iw` 做诊断会得到一片
-`unavailable`，看起来像工具坏了。全部走 `cmd wifi` 与 `dumpsys`，这两个都在。
-
-### 「扫到 ch100」≠「设置里能看到 ch100」
-
-实测：周边 46 个 AP，DFS 段扫到 7 个，最强的一个就在 **5500 MHz（ch100）、-25 dBm**，
-设置界面里依然看不到。原因是 DFS 信道默认**被动扫描**，且 UI 有独立的展示过滤。
-
-判断顺序：先看扫到的 100-144 是否为 0；为 0 则射频层过滤或附近真没有；
-不为 0 则信道可用，UI 看不到属于展示/缓存问题，手动添加网络即可连。
-
----
-
-## 5GHz / DFS 信道
-
-**改了国家码仍搜不到 100-144，通常不是模块没生效。**
-
-ch100-144 属 **UNII-2C（5470-5725 MHz）**，在美国是 DFS 频段（与雷达共存）。
-它受四层约束，`cmd wifi` 只能影响第一层：
-
-| 层 | 谁在管 | 能否从 root 改 |
-|---|---|---|
-| framework | WifiService / `cmd wifi` | 能（本模块已做） |
-| kernel regdb | cfg80211 / `iw reg set` | 能（本模块已做，常被厂商驱动忽略） |
-| 驱动/固件 | 厂商 BDF / `WCNSS_qcom_cfg.ini` | 部分能（本模块尝试 overlay） |
-| 射频能力 | 硬件与固件实际支持的信道表 | **不能** |
-
-WebUI 的「信道」页把这段拆开显示：`UNII-2A (52-64)` / `UNII-2C (100-144)` / `UNII-3 (149+)`
-三个计数按**信道号**分桶，不是频率区间——5725 MHz 正好是 ch149，用频率判定会把
-UNII-3 算成 UNII-2C。命令行等价输出：
-
-```sh
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'
-```
-
-看 `bss_unii2c`：若为 0，说明固件信道表里没有 UNII-2C，**没有任何国家码设置能让它出现**。
-
-完整四层转储（含 `iw reg get`、PHY 信道表、vendor ini）：
-
-```sh
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'
-# 同时写入 diagnose.log
-```
-
-### DFS 的额外限制
-
-即使信道在表里，标了 `radar detection` 的信道**默认只能被动扫描**：设备不发探测帧，
-只能等 AP 发信标。所以 DFS AP 发现偏慢。若 AP 隐藏了 SSID，被动扫描永远发现不了，
-只能手动添加网络。
-
----
-
-## 排障
-
-```sh
-cat /data/adb/modules/KsuFastSurfing/mount.log     # 挂载结果
-cat /data/adb/modules/KsuFastSurfing/manager.log   # 合并 / 国家码
-cat /data/adb/modules/KsuFastSurfing/probe.log     # 探测
-sh /data/adb/modules/KsuFastSurfing/manager.sh status
-```
-
-| 现象 | 常见原因 |
-|---|---|
-| `mounted=0` | 未重启；或 SELinux 阻止 bind mount（看 `mount.log`） |
-| hosts 生效但没加速 | 运营商/DNS 走了 DoT/DoH，绕过 hosts |
-| 探测 0 个候选 | 所有解析方式都拿不到地址（DNS 被拦 / 未联网）。不是超时问题，调 `PROBE_TIMEOUT` 无效 |
-| 探测有候选但全不可达 | 地址解析正常，443 连不上；看 `probe.log` 确认是否被墙 |
-| MAC 显示星号 | 该 ROM 没有 `wpa_cli`，只能拿框架脱敏值；不编造地址 |
-| 国家码不生效 | 厂商 ROM 固定在 vendor 层；看 `manager.log` 的 `cmd wifi` 返回 |
-| 国家码生效但无 ch100-144 | `diagnose` 的 `bss_unii2c=0` 则是固件硬限制，软件无解 |
-
-## 频谱与帧注入的可行性
-
-结论先给：**内置射频做不了频谱仪，也做不了 deauth**。这不是代码量的问题，是两层硬件前提：
-
-| 能力 | 前提 | 手机内置芯片通常如何 |
-|---|---|---|
-| 噪声 / 信道占用 | 驱动实现 `NL80211_CMD_GET_SURVEY` | 高通 `qcacld` 多半没实现，`iw survey dump` 返回空 |
-| 频谱曲线 | 监听模式 + 逐帧 RSSI | 无监听模式，且逐帧 RSSI 本身不是扫频功率 |
-| deauth / 帧注入 | 监听模式 + 固件允许注入 | 原厂固件一律关闭，需打补丁或外接网卡 |
-
-区分三个常被混为一谈的东西：
-
-1. **每 AP 的 RSSI**（本模块已有）：每个网络一个数，不构成频谱。它只覆盖正在发信标的 AP，看不到非 Wi-Fi 干扰源（微波炉、蓝牙、无绳电话）。
-2. **survey 的 channel busy time**：驱动统计"这段时间里该信道有多少比例在忙"。这是时间占比，不是功率，做不了瀑布图，但足以回答"哪个信道被占得最厉害"——比现在按 AP 数估算准得多。
-3. **真正的频谱仪**：每 MHz 的功率曲线，需要监听模式逐包取 RSSI，或外接 SDR。手机内置芯片给不了。
-
-`iw` 在零售 ROM 上不存在，所以本项目不假设它可用：能查的只有
-`/sys/kernel/debug/ieee80211/` 下驱动自己暴露的节点，和 `wpa_cli signal_poll`
-里的 `NOISE=`。两者都拿不到时，结论是"未确认"，不是"支持"。
-
-模块内置 `capacity.sh` 就是让设备自己回答这件事，而不是按机型推测——同一
-系列手机常配不同射频：
-
-```sh
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh capacity'
-```
-
-WebUI「信道」页的**硬件能力**卡片调的是同一个脚本。三项若都是"不支持"，
-就不用再往这个方向投入；若 `survey=yes`，下一步可以加一张信道忙闲图
-（数据现成，只差一次 netlink 读取）。若 `monitor=yes` 而
-`monitor_creatable=no`，说明驱动声明了却没真正实现，这类"看起来能做"的情况
-比直接不支持更容易浪费时间，所以单独标红。
-
-关于 deauth：即便硬件支持，本模块也不会实现。抓包注入是在别人的网络上
-主动干扰，与当前所做"测量自己链路的状况"是两件事。
-
-## 已知限制
-
-- 开机不检测，所以开机后 hosts 就是上次保存的内容；要更新就打开 WebUI 点一次
-- `cmd wifi force-country-code` 的返回文案各厂商不同，重试判断靠关键词匹配（0.3/0.6/1.2 s 退避）
-- 部分设备 vendor 层固定国家码，属性通道无效，只能靠 `cmd wifi`
-- 极老设备 `/data` 就绪慢时，`post-fs-data` 的等待窗口可能不够
-
----
-
-## 开发
-
-```sh
-./build.sh              # 打包到 dist/；在暂存副本里内联 diag.js，不改动仓库文件
-node tests/test-diag.js # 解析器：敌意 SSID、RSSI 格式、UNII、分段采集
-node tests/test-status.js # 交互：检测只追加、单按钮保存、动作后不做二次全量刷新
-```
-
-提交前检查：
-
-```sh
-./build.sh
-for f in module/*.sh; do busybox ash -n "$f"; done
-node tests/test-diag.js
-node tests/test-status.js
-cp -r module /tmp/m && printf '1.1.1.1\tgithub.com\n2.2.2.2\tgithub.com\n' > /tmp/m/user-hosts
-sh /tmp/m/manager.sh build
-awk '/^[0-9]/{print $2}' /tmp/m/hosts | sort | uniq -d   # 无输出
-```
-
-### 目录
-
-```
-KsuFastSurfing/
-├── build.sh             打包（显式写 POSIX 权限位，逐字节可复现）
-├── tests/               回归测试
-├── dist/                构建产物（不入库）
-└── module/
-    ├── module.prop       模块元数据
-    ├── config            运行配置
-    ├── manager.sh        唯一控制面（apply / status / set-cc / diagnose / capacity）
-    ├── collect.sh        一次采集：扫描 / 链路 / 路由 / ping / supplicant
-    ├── post-fs-data.sh   启动：只合并与挂载，不联网
-    ├── action.sh         管理器「运行」按钮（重新应用，不探测）
-    ├── uninstall.sh      清理
-    ├── customize.sh      安装期权限
-    ├── diagnose.sh       四层信道诊断（只读）
-    ├── capacity.sh       射频能力探测（survey / 监听 / 注入）
-    ├── probe.sh          本机 IP 检测（只读，结果打到 stdout + probe.log）
-    ├── domains           待检测域名列表
-    ├── hosts             合并产物（manager.sh build 生成）
-    ├── user-hosts        唯一来源，由「保存并应用」写入
-    ├── system.prop       国家码属性
-    ├── system/etc/hosts  metamodule 路径备份
-    └── webroot/
-        ├── index.html    WebUI（引用 diag.js；打包时内联进 dist 副本）
-        └── diag.js       数据层：解析 + 分析
-```
-
-### 脚本规范
-
-- Shebang 一律 `#!/system/bin/sh`，用 `busybox ash -n` 校验（Android 上没有 bash）
-- `MODDIR` 用 `case "$0" in */*) MODDIR=${0%/*} ;; *) MODDIR=. ;; esac`
-  —— `${0%/*}` 在 `sh manager.sh` 这种相对调用下会得到 `manager.sh`
-- 不依赖 `curl`/`wget` 必然存在，按 `curl → wget → busybox wget` 降级
-- 修改状态前先 `umount`，挂载要幂等
-- 写文件走「临时文件 + 校验 + mv」，不做原地覆盖
-
-### 不要指望 Android 的 awk 和桌面上的一样
-
-真机上已经踩过三次：
-
-| 差异 | 表现 |
-|---|---|
-| 没有 `strftime` | `awk: calling undefined function strftime`，整个报告中止 |
-| 没有数学函数 | `Math support is not compiled in`，`10^x`、`log()` 直接失败 |
-| `gsub` 反斜杠不同 | 同样写法 gawk 输出 `\"`，busybox 输出裸 `"` |
-
-所以：时间戳由 `date` 生成后用 `-v ts=` 传入；功率换算用整数单位连乘；
-JSON 转义逐字节循环。写新 awk 前先在 `busybox awk` 下跑一遍。
-
-### WebUI 规范
-
-- **不要写 `import { exec } from 'kernelsu'`**。该名字是 npm 包，静态页面里 import 会抛
-  `Failed to resolve module specifier`，且因后续代码不执行，**所有状态为空、开关全关**
-- 正确做法是调管理器注入的全局对象：`ksu.exec(cmd, optsJson, callbackName)`
-- 模块路径用 `JSON.parse(ksu.moduleInfo()).moduleDir`，不要硬编码
-- 拿不到 `ksu` 时降级成可读提示
-- 不设页面背景与 `color-scheme`，交给 KernelSU
-- **打包产物**的 `index.html` 必须自包含（构建时把 `diag.js` 内联进 `dist` 副本），
-  WebView 对相对路径 `<script src>` 不可靠；仓库里两者分开存放，构建不修改源文件
-- 按钮只做用户按下的那一件事：检测不写文件，保存不偷偷探测
+- Android 8+ 可安装；`cmd wifi`、`get-country-code` 需要 Android 10+
+- KernelSU 与 Magisk 均可；依赖 root 执行 `cmd wifi` / `wpa_cli`
+- 不假设 `iw`、`curl`、`wget`、`awk` 的桌面版行为，逐项降级
+- 部分厂商 ROM 在 vendor / 固件层固定国家码，软件无法突破，`diagnose` 会指出是哪一层
 
 ## 许可
 
