@@ -60,6 +60,42 @@
          background:var(--card); border:1px solid var(--line); color:var(--dim); }
   .tag.dfs { border-color:var(--warn); color:var(--warn); }
   .tag.u3 { border-color:var(--accent); color:var(--accent); }
+  .tag.cur { border-color:var(--ok); color:var(--ok); }
+
+  /* AP list: one block per network name, name centred, then its radios.
+     Fixed grid tracks keep the numbers in columns across groups. */
+  .ap-head, .ap-row { display:grid; grid-template-columns:1fr 34px 52px 44px 58px;
+                      gap:6px; align-items:baseline;
+                      font-variant-numeric:tabular-nums; }
+  .ap-head { font-size:10px; color:var(--dim); letter-spacing:.04em;
+             padding:0 2px 6px; border-bottom:1px solid var(--line); }
+  .ap-head span:nth-child(n+2) { text-align:right; }
+  .ap-head span:last-child { text-align:left; }
+  .ap-group { padding:13px 0 4px; border-bottom:1px dashed var(--line); }
+  .ap-group:last-child { border-bottom:none; padding-bottom:0; }
+  .ap-group.cur .ap-name { color:var(--ok); }
+  .ap-name { text-align:center; font-size:14.5px; font-weight:700; margin:0 0 3px;
+             line-height:1.35; word-break:break-word; }
+  .ap-meta { text-align:center; font-size:10.5px; color:var(--dim); margin-bottom:7px; }
+  .ap-row { font-size:11.5px; padding:6px 2px 6px; border-bottom:1px solid var(--line); }
+  .ap-row:last-child { border-bottom:none; }
+  .ap-row .mac { font-family:ui-monospace,monospace; font-size:10.5px; word-break:break-all;
+                 white-space:nowrap; overflow:hidden; }
+  /* A full MAC is 17 monospace characters. Wrapping it would break the
+     column alignment for every following row, so narrow screens get a smaller
+     font and tighter numeric tracks instead - the address must stay readable,
+     otherwise the rows cannot be told apart at all. */
+  @media (max-width:380px) {
+    .ap-head, .ap-row { grid-template-columns:1fr 30px 44px 38px 50px; gap:3px; }
+    .ap-row .mac { font-size:9px; letter-spacing:-.3px; }
+  }
+  @media (max-width:340px) {
+    .ap-head, .ap-row { grid-template-columns:1fr 26px 40px 34px 44px; gap:3px; }
+    .ap-row .mac { font-size:8.5px; letter-spacing:-.5px; }
+    .ap-row, .ap-head { font-size:10.5px; }
+  }
+  .ap-row .num { text-align:right; }
+  .ap-row .ty { justify-self:start; }
   button.act { width:100%; padding:12px; border-radius:10px; border:none; font-size:14px;
                font-weight:650; background:var(--accent); color:#fff; margin-top:8px; }
   button.act:active { opacity:.75; }
@@ -190,11 +226,12 @@
 <section class="page" id="p-ap">
   <div class="card">
     <h2>全部 AP <span class="tag" id="ap-count">—</span></h2>
-    <table>
-      <thead><tr><th>SSID</th><th>ch</th><th>MHz</th><th class="n">RSSI</th><th>类型</th></tr></thead>
-      <tbody id="ap-rows"></tbody>
-    </table>
-    <div class="muted">DFS 为雷达共存信道（52-64 / 100-144），默认被动扫描，发现更慢。</div>
+    <!-- Grouped by network name, because one name is usually served by several
+         radios (mesh, repeater, one router on 2.4 and 5GHz). A flat list of
+         SSIDs hid every radio but the strongest. -->
+    <div class="ap-head"><span>BSSID</span><span>ch</span><span>MHz</span><span>RSSI</span><span>类型</span></div>
+    <div id="ap-groups"></div>
+    <div class="muted">同名 AP 归为一组，组内按信号从强到弱。DFS 为雷达共存信道（52-64 / 100-144），默认被动扫描，发现更慢。</div>
   </div>
   <div class="card">
     <h2>DFS 分带</h2>
@@ -326,8 +363,14 @@ function parseScan(txt) {
     const band = freq <= 2500 ? '2.4' : (freq <= 5895 ? '5' : '6');
     const ch = chanOf(freq);
 
+    /* Security as shown in the AP list. Two radios on one SSID can differ
+       here, which is exactly when it matters. */
+    const sec = /SAE/.test(flags) ? 'WPA3' :
+                /RSN/.test(flags) ? 'WPA2' :
+                /WPA/.test(flags) ? 'WPA' : '开放';
+
     rows.push({
-      bssid, freq, rssi, age, ssid, flags, band, ch,
+      bssid, freq, rssi, age, ssid, flags, band, ch, sec,
       dfs: isDfs(ch) ? 1 : 0,
       unii: uniiOf(ch),
       wpa3: /SAE/.test(flags) ? 1 : 0,
@@ -479,6 +522,28 @@ function analyse(rows, link, net) {
   });
   const aps = [...bySsid.values()].sort((a, b) => b.rssi - a.rssi);
 
+  /* Every BSSID, grouped by SSID. One network name is often served by several
+     radios (mesh, repeaters, a router running 2.4 and 5GHz under one name), and
+     seeing them together is the whole point of the AP page. Groups are ordered
+     by their strongest member; members by signal, then channel, so the list
+     does not reshuffle between scans on equal RSSI. */
+  const byName = new Map();
+  rows.forEach(a => {
+    const key = a.ssid || '\u0000hidden';
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(a);
+  });
+  const groups = [...byName.entries()].map(([key, list]) => {
+    list.sort((a, b) => b.rssi - a.rssi || a.ch - b.ch);
+    return {
+      ssid: key === '\u0000hidden' ? '' : key,
+      count: list.length,
+      best: list[0].rssi,
+      chans: [...new Set(list.map(a => a.ch))].sort((x, y) => x - y),
+      bssids: list
+    };
+  }).sort((a, b) => b.best - a.best || (a.ssid < b.ssid ? -1 : 1));
+
   const best = aps[0] || {};
 
   /* Congestion counts raw BSSIDs, not SSIDs: one SSID on five radios still
@@ -520,7 +585,7 @@ function analyse(rows, link, net) {
     best: { rssi: best.rssi || 0, ssid: best.ssid || '', freq: best.freq || 0 },
     link: link || { ssid: '', freq: 0, ch: 0, rssi: 0, mbps: 0, std: '' },
     ageMax: rows.reduce((m, a) => Math.max(m, a.age || 0), 0),
-    dfsCh, aps, congestion, roam, scores,
+    dfsCh, aps, groups, congestion, roam, scores,
     verdict: {
       dfs: dfsVerdict, net: netVerdict,
       dns: net.dns, best_ch: scores.length ? scores[0].ch : null
@@ -729,14 +794,25 @@ function render(d) {
      <td class="n ${qcls(a.rssi)}">${a.rssi}</td></tr>`).join('') || '<tr><td>—</td></tr>';
 
   /* --- channel page --- */
-  $('ap-count').textContent = s.total + ' AP';
-  $('ap-rows').innerHTML = d.aps.slice(0, 40).map(a => {
-    const t = a.dfs ? '<span class="tag dfs">DFS</span>' :
-              (a.unii === 'UNII-3' ? '<span class="tag u3">UNII-3</span>' :
-               '<span class="tag">' + esc(a.unii || '普通') + '</span>');
-    return `<tr><td>${esc(a.ssid) || '(隐藏)'}</td><td>${a.ch}</td><td>${a.freq}</td>
-            <td class="n ${qcls(a.rssi)}">${a.rssi}</td><td>${t}</td></tr>`;
-  }).join('') || '<tr><td>—</td></tr>';
+  const curSsid = d.link.ssid || '';
+  $('ap-count').textContent = s.total + ' AP · ' + d.groups.length + ' 个名称';
+  $('ap-groups').innerHTML = d.groups.map(g => {
+    const on = g.ssid && g.ssid === curSsid;
+    const secs = [...new Set(g.bssids.map(a => a.sec))].join(' / ');
+    const rows = g.bssids.map(a => {
+      const t = a.dfs ? '<span class="tag dfs">DFS</span>' :
+                (a.unii === 'UNII-3' ? '<span class="tag u3">U3</span>' :
+                 '<span class="tag">' + esc(a.unii || '普通') + '</span>');
+      return `<div class="ap-row"><span class="mac">${esc(a.bssid)}</span>
+        <span class="num">${a.ch}</span><span class="num">${a.freq}</span>
+        <span class="num ${qcls(a.rssi)}">${a.rssi}</span>
+        <span class="ty">${t}</span></div>`;
+    }).join('');
+    return `<div class="ap-group${on ? ' cur' : ''}">
+      <div class="ap-name">${esc(g.ssid) || '(隐藏)'}${on ? ' <span class="tag cur">已连接</span>' : ''}</div>
+      <div class="ap-meta">${g.count} 个射频 · ${esc(secs)}</div>
+      ${rows}</div>`;
+  }).join('') || '<div class="ap-meta">无数据</div>';
   setV($('d-ndfs'), s.ndfs + ' 个', s.ndfs > 0 ? 'ok' : 'bad');
   setV($('d-u2a'), s.nunii2a + ' 个');
   setV($('d-u2c'), s.nunii2c + ' 个', s.nunii2c > 0 ? 'ok' : 'bad');

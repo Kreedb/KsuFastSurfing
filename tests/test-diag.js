@@ -147,7 +147,7 @@ console.log('== full analysis ==');
   const scan = HDR +
     '  68:19:aa:bb:cc:01       5500    -25(0:-25/1:-30)    9.0    COFEEB32AE        [RSN-PSK][ESS]\n' +
     '  68:19:aa:bb:cc:02       5785    -58(0:-58/1:-63)    11.0    Li7E641E1C        [RSN-PSK][ESS]\n' +
-    '  68:19:aa:bb:cc:03       5785    -58(0:-58/1:-63)    11.0    Li5DAA9D1D        [RSN-PSK][ESS]\n' +
+    '  68:19:aa:bb:cc:03       5785    -58(0:-58/1:-63)    11.0    Li7E641E1C        [RSN-PSK][ESS]\n' +
     '  68:19:aa:bb:cc:04       2437    -53(0:-53/1:-58)    11.0    LVDE62DDE2        [RSN-PSK][ESS]\n' +
     '  68:19:aa:bb:cc:05       5180    -67(0:-67/1:-72)    11.0    TR096CAB33        [RSN-PSK][ESS]\n' +
     '  68:19:aa:bb:cc:06       5300    -83(0:-83/1:-88)    10.0    TR82457E94        [RSN-PSK][ESS]\n';
@@ -178,9 +178,45 @@ console.log('== full analysis ==');
 
   /* No gateway must be distinguishable from a measured 0% loss. */
   const d2 = api.analyse(api.parseScan(scan), link, { gateway: '', loss: null, rtt: null, dns: 'fail' });
+  /* Same name on two radios must stay two rows in one group, and the group
+     must be anchored by its strongest member. The AP page used to dedupe to
+     the strongest BSSID, which made a mesh look like a single radio. */
+  eq('group count', d.groups.length, 5);
+  eq('Li7E641E1C radios', d.groups.find(g => g.ssid === 'Li7E641E1C').count, 2);
+  eq('Li7E641E1C channels', d.groups.find(g => g.ssid === 'Li7E641E1C').chans, [157]);
+  eq('group order by best', d.groups[0].ssid, 'COFEEB32AE');
+  eq('group best rssi', d.groups[0].best, -25);
+  eq('secondary radio kept', d.groups.find(g => g.ssid === 'Li7E641E1C').bssids[1].bssid,
+     '68:19:aa:bb:cc:03');
+
   eq('no gateway verdict', d2.verdict.net, 'nogw');
   eq('no gateway is not 0% loss', d2.loss, null);
   eq('dns fail surfaces', d2.verdict.dns, 'fail');
+
+  /* Every radio in the scan must survive grouping: losing one would hide a
+     whole band of a network the user is trying to diagnose. */
+  eq('all radios grouped', d.groups.reduce((n, g) => n + g.count, 0), 6);
+  eq('groups agree with aps', d.groups.length, d.aps.length);
+}
+
+/* ---------- 8. security label per radio ---------- */
+console.log('== per-radio security ==');
+{
+  const scan = HDR +
+    '  68:19:aa:bb:cc:11       5180    -50(0:-50/1:-55)    4.0    Mixed            [RSN-PSK][ESS]\n' +
+    '  68:19:aa:bb:cc:12       2437    -62(0:-62/1:-67)    4.0    Mixed            [WPA-PSK][ESS]\n' +
+    '  68:19:aa:bb:cc:13       5745    -70(0:-70/1:-75)    4.0    Open             [ESS]\n' +
+    '  68:19:aa:bb:cc:14       5955    -66(0:-66/1:-71)    4.0    Modern           [RSN-SAE][ESS]\n';
+  const rows = api.parseScan(scan);
+  eq('wpa2', rows.find(r => r.bssid.endsWith(':11')).sec, 'WPA2');
+  eq('wpa', rows.find(r => r.bssid.endsWith(':12')).sec, 'WPA');
+  eq('open', rows.find(r => r.bssid.endsWith(':13')).sec, '开放');
+  eq('wpa3', rows.find(r => r.bssid.endsWith(':14')).sec, 'WPA3');
+
+  /* One name, two different security modes: the group header must not claim a
+     single mode, so it renders each radio's own label. */
+  const d = api.analyse(rows, {}, { gateway: '', loss: null, rtt: null, dns: 'ok' });
+  eq('mixed group radios', d.groups.find(g => g.ssid === 'Mixed').count, 2);
 }
 
 console.log(failures ? `\n${failures} failure(s)` : '\nall parser tests passed');

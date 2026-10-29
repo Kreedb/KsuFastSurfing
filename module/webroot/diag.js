@@ -51,8 +51,14 @@ function parseScan(txt) {
     const band = freq <= 2500 ? '2.4' : (freq <= 5895 ? '5' : '6');
     const ch = chanOf(freq);
 
+    /* Security as shown in the AP list. Two radios on one SSID can differ
+       here, which is exactly when it matters. */
+    const sec = /SAE/.test(flags) ? 'WPA3' :
+                /RSN/.test(flags) ? 'WPA2' :
+                /WPA/.test(flags) ? 'WPA' : '开放';
+
     rows.push({
-      bssid, freq, rssi, age, ssid, flags, band, ch,
+      bssid, freq, rssi, age, ssid, flags, band, ch, sec,
       dfs: isDfs(ch) ? 1 : 0,
       unii: uniiOf(ch),
       wpa3: /SAE/.test(flags) ? 1 : 0,
@@ -204,6 +210,28 @@ function analyse(rows, link, net) {
   });
   const aps = [...bySsid.values()].sort((a, b) => b.rssi - a.rssi);
 
+  /* Every BSSID, grouped by SSID. One network name is often served by several
+     radios (mesh, repeaters, a router running 2.4 and 5GHz under one name), and
+     seeing them together is the whole point of the AP page. Groups are ordered
+     by their strongest member; members by signal, then channel, so the list
+     does not reshuffle between scans on equal RSSI. */
+  const byName = new Map();
+  rows.forEach(a => {
+    const key = a.ssid || '\u0000hidden';
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(a);
+  });
+  const groups = [...byName.entries()].map(([key, list]) => {
+    list.sort((a, b) => b.rssi - a.rssi || a.ch - b.ch);
+    return {
+      ssid: key === '\u0000hidden' ? '' : key,
+      count: list.length,
+      best: list[0].rssi,
+      chans: [...new Set(list.map(a => a.ch))].sort((x, y) => x - y),
+      bssids: list
+    };
+  }).sort((a, b) => b.best - a.best || (a.ssid < b.ssid ? -1 : 1));
+
   const best = aps[0] || {};
 
   /* Congestion counts raw BSSIDs, not SSIDs: one SSID on five radios still
@@ -245,7 +273,7 @@ function analyse(rows, link, net) {
     best: { rssi: best.rssi || 0, ssid: best.ssid || '', freq: best.freq || 0 },
     link: link || { ssid: '', freq: 0, ch: 0, rssi: 0, mbps: 0, std: '' },
     ageMax: rows.reduce((m, a) => Math.max(m, a.age || 0), 0),
-    dfsCh, aps, congestion, roam, scores,
+    dfsCh, aps, groups, congestion, roam, scores,
     verdict: {
       dfs: dfsVerdict, net: netVerdict,
       dns: net.dns, best_ch: scores.length ? scores[0].ch : null
