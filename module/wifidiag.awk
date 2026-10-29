@@ -57,6 +57,10 @@ function quality(r) {
 
 BEGIN {
   schema = 1; na = 0; ndfsch = 0
+  # strftime() is a gawk extension and Android's awk does not implement it, so
+  # the timestamp is formatted by the shell (date) and passed in with -v ts=.
+  # Never reintroduce strftime here: it aborts the whole report on device.
+  if (ts == "") ts = "unknown"
   # Two renderers share one computation pass. Default to the text report so the
   # old `report` behaviour is preserved; the shell passes -v out_fmt=json for
   # the machine interface.
@@ -269,7 +273,7 @@ END {
 function emit_json(   i, j, m, t, lim, nc, nr, dfs_v, net_v) {
   printf "{\n"
   printf "  \"schema\":%d,\n", schema
-  printf "  %s,\n", pair("generated", strftime("%Y-%m-%dT%H:%M:%S"))
+  printf "  %s,\n", pair("generated", ts)
 
   printf "  \"summary\":{"
   printf "%s,%s,%s,%s,", num("total", n), num("n24", n24), num("n5", n5), num("n6", n6)
@@ -356,7 +360,7 @@ function emit_json(   i, j, m, t, lim, nc, nr, dfs_v, net_v) {
 }
 
 function emit_text(   i, j, m, t, lim, dfs_v, net_v, dfs_str) {
-  printf "# KsuFastSurfing wifidiag report %s\n", strftime("%Y-%m-%d %H:%M:%S")
+  printf "# KsuFastSurfing wifidiag report %s\n", ts
   printf "# sections: summary / rf / link / channel / scan / score / roam / congestion / aps / net / verdict\n"
 
   printf "[summary]\n"

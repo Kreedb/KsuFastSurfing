@@ -58,6 +58,33 @@ jobs:
             grep -q "^$want" /tmp/m/hosts || { echo "::error::missing $want line"; exit 1; }
           done
 
+      - name: Verify in-page diagnostic parser
+        run: |
+          # The WebUI parses device output itself now, so this is the only path
+          # between `cmd wifi` and every number on screen.
+          node tests/test-diag.js
+
+      - name: Verify index.html is self-contained
+        run: |
+          # The WebView loads this from an internal path where <script src>
+          # resolution is unreliable, so diag.js must be inlined - and must be
+          # the current copy, not a stale one.
+          ./build.sh >/dev/null
+          grep -q '=== DIAG' module/webroot/index.html
+          if grep -q '<script src=' module/webroot/index.html; then
+            echo "::error::index.html references an external script"; exit 1
+          fi
+          # Every function the page calls must exist in the inlined copy.
+          node -e '
+            const fs = require("fs");
+            const s = fs.readFileSync("module/webroot/index.html", "utf8");
+            const js = s.match(/<script>([\s\S]*?)<\/script>/)[1];
+            for (const fn of ["parseScan","parseLink","analyse","scoreChannels","measure","render"]) {
+              if (!js.includes("function " + fn) && !js.includes("async function " + fn))
+                { console.error("missing " + fn); process.exit(1); }
+            }
+          '
+
       - name: Verify diagnose output (JSON + text)
         run: |
           # Fixtures and assertions live in tests/, not inline: a nested heredoc

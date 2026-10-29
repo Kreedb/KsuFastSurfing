@@ -174,7 +174,8 @@ KsuFastSurfing/
     ├── user-hosts       用户手动条目（最高优先级）
     ├── domains          参与探测的域名列表
     ├── probe.sh         本地 IP 探测（并发 + 超时）
-    ├── wifidiag.sh      WiFi 诊断：采集 + 调度（薄壳）
+    ├── webroot/diag.js  WebUI 的数据层：读接口 + 解析 + 分析（构建时内联）
+    ├── wifidiag.sh      WiFi 诊断：采集 + 调度（命令行用薄壳）
     ├── wifidiag.awk     解析/分析/渲染，一趟输出 text 或 JSON
     ├── jsonlib.awk      JSON 字符串转义（按字节，gawk/busybox 一致）
     ├── system/etc/hosts metamodule 路径备份
@@ -236,7 +237,8 @@ KsuFastSurfing/
 ```sh
 ./build.sh                                   # 打包通过
 for f in module/*.sh; do busybox ash -n "$f"; done   # 语法
-sh tests/check-diag.sh                       # 诊断输出（敌意 SSID、JSON 结构）
+node tests/test-diag.js                      # 网页解析器（敌意 SSID、推荐规则）
+sh tests/check-diag.sh                       # 命令行诊断输出（JSON 结构）
 ./module/manager.sh build                    # 合并可用
 awk '/^[0-9]/{print $2}' module/hosts | sort | uniq -d   # 无重复（应无输出）
 ```
@@ -380,6 +382,28 @@ AP 就能毁掉整个信道。所以先按 `10^(rssi/10)` 把 dBm 换算成线�
    只按负载排序的话，工具会永远回答“ch 108”，数字没错但建议无用。
 2. **同分时优先本次扫描里真实出现过的信道**，未扫描到的信道只是理论值，
    可能被射频层过滤掉了。
+
+### 数据在网页里解析，不经过脚本
+
+WebUI 通过 `ksu.exec` 以 root 执行命令，所以**页面可以直接读设备接口**：
+
+```
+cmd wifi list-scan-results   →  解析成 AP 列表
+cmd wifi status              →  当前链路
+ip route + ping              →  网关 / 丢包 / RTT / DNS
+```
+
+解析和计算都在 `webroot/diag.js` 里。这样做不是为了少写几行 shell：
+
+- **不依赖设备上的 awk**。Android 的 awk 没有 `strftime`（报错
+  `calling undefined function strftime`），没有数学函数（`Math support is
+  not compiled in`），`gsub` 的转义还和 gawk 不一致。这些坑都得在真机上才撞到。
+- **没有中间文件**。不需要 `report.json`，不需要担心它和实际测量不同步。
+- **屏幕上永远是刚测到的数**，不是上一次扫描的缓存。
+- **少一次进程启动**，页面还更快。
+
+`wifidiag.sh` / `wifidiag.awk` 仍然保留，供命令行使用；页面不依赖它们。
+两者都有回归测试（`tests/`），因为它们是同一套规则的两种实现。
 
 ### 输出格式：JSON，不是分隔符
 

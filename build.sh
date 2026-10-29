@@ -22,6 +22,28 @@ VER=$(sed -n 's/^version=//p'    "$MOD/module.prop" | tail -1)
 OUT="$DIST/$ID-$VER.zip"
 mkdir -p "$DIST"
 
+# index.html must be self-contained: the WebView loads it from an internal path
+# where <script src> resolution has been unreliable. diag.js is kept separate so
+# node can load it for tests, and inlined here.
+inline_diag() {
+  idx="$MOD/webroot/index.html"
+  src="$MOD/webroot/diag.js"
+  [ -f "$src" ] || { echo "error: webroot/diag.js missing" >&2; exit 1; }
+  grep -q '=== DIAG' "$idx" || { echo "error: index.html has no DIAG marker" >&2; exit 1; }
+  python3 - "$idx" "$src" << 'PYINLINE'
+import pathlib, sys
+idx, src = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+s = idx.read_text()
+start = s.index('/* === DIAG')
+end = s.index('/* === end DIAG === */')
+s = s[:start] + '/* === DIAG (source: webroot/diag.js, inlined by build.sh) === */\n' + src.read_text() + '\n' + s[end:]
+idx.write_text(s)
+print(f"inlined {src.name} into {idx.name}")
+PYINLINE
+}
+
+inline_diag
+
 python3 - "$MOD" "$OUT" << 'PY'
 import stat, sys, zipfile, pathlib
 

@@ -223,6 +223,276 @@
 </section>
 
 <script>
+/* === DIAG (source: webroot/diag.js, inlined by build.sh) === */
+/* ===================================================================
+   Data acquisition and analysis, entirely in the page.
+
+   The WebUI bridge (`ksu.exec`) runs commands as root, so the page can
+   read the same interfaces the shell script used to: `cmd wifi
+   list-scan-results`, `cmd wifi status`, `dumpsys wifi`, `ip route`,
+   `ping`. Parsing them in JS means:
+
+     - no awk on the device to go wrong (Android's awk has no strftime,
+       no math functions, and differs from gawk in gsub escapes)
+     - no temp files, no report.json to keep in sync
+     - the version on screen is always the bytes just measured
+
+   `wifidiag.sh` stays for command-line use, but nothing in this page
+   depends on it.
+   =================================================================== */
+
+/* One shell call per data source. Deliberately separate: a failure in one
+   must not blank the rest, and the UI can report which source failed. */
+async function sh(cmd) {
+  const r = await exec(cmd, { cwd: '/' });
+  return { out: (r.stdout || ''), err: (r.stderr || ''), code: r.errno };
+}
+
+/* ---------- scan cache ----------
+   Stock format, space aligned:
+     BSSID  Frequency  RSSI(link:rssi0/rssi1)  Age(sec)  SSID  Flags
+   SSID is the free-text field, so it is taken as everything between the age
+   column and the first '[' of the Flags column - never by splitting on a
+   delimiter, because an SSID can contain anything. */
+function parseScan(txt) {
+  const rows = [];
+  const lines = (txt || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (!raw || !raw.trim()) continue;
+    if (/^\s*BSSID\s+Frequency/i.test(raw)) continue;      // header
+
+    const m = raw.match(/^\s*(\S+)\s+(\d+)\s+(-?\d+)(?:\([^)]*\))?\s+([\d.]+)\s+(.*)$/);
+    if (!m) continue;
+    const bssid = m[1], freq = +m[2], rssi = +m[3], age = parseFloat(m[4]);
+    let rest = m[5];
+
+    /* Flags begin at the first '['. Everything before it is the SSID. */
+    const bracket = rest.indexOf('[');
+    let ssid = bracket >= 0 ? rest.slice(0, bracket).trim() : rest.trim();
+    const flags = bracket >= 0 ? rest.slice(bracket) : '';
+    if (ssid === 'null') ssid = '';
+
+    if (freq < 2400) continue;
+    const band = freq <= 2500 ? '2.4' : (freq <= 5895 ? '5' : '6');
+    const ch = chanOf(freq);
+
+    rows.push({
+      bssid, freq, rssi, age, ssid, flags, band, ch,
+      dfs: isDfs(ch) ? 1 : 0,
+      unii: uniiOf(ch),
+      wpa3: /SAE/.test(flags) ? 1 : 0,
+      open: !/RSN|WPA/.test(flags) ? 1 : 0
+    });
+  }
+  return rows;
+}
+
+/* Channel number from frequency. 2484 is ch14; the 5GHz grid is 5MHz from
+   5000, the 6GHz grid 5MHz from 5950. */
+function chanOf(f) {
+  if (f <= 2500) return f === 2484 ? 14 : Math.floor((f - 2407) / 5);
+  if (f <= 5895) return Math.floor((f - 5000) / 5);
+  return Math.floor((f - 5950) / 5);
+}
+
+/* UNII-2A is 52-64, UNII-2C is 100-144 - by channel number, because 5725MHz
+   is exactly ch149 (UNII-3) and a frequency test misclassifies it. */
+function isDfs(c) { return (c >= 52 && c <= 64) || (c >= 100 && c <= 144); }
+function uniiOf(c) {
+  if (c < 36) return '-';
+  if (c <= 64) return 'UNII-2A';
+  if (c <= 144) return 'UNII-2C';
+  return 'UNII-3';
+}
+
+/* ---------- connected link ----------
+   `cmd wifi status` prints one WifiInfo line. Fields are comma separated but
+   SSID is quoted, so a comma inside an SSID would break a naive split. */
+function parseLink(txt) {
+  const line = ((txt || '').split('\n').find(l => /WifiInfo:/.test(l)) || '');
+  if (!line) return null;
+
+  const grab = (re) => { const m = line.match(re); return m ? m[1] : ''; };
+  /* [^"]* stops at the closing quote even when the SSID contains commas. */
+  const ssid = grab(/SSID:\s*"([^"]*)"/);
+  const freq = +grab(/Frequency:\s*(\d+)/) || 0;
+  const rssiRaw = grab(/RSSI:\s*(-?\d+)/);
+  const rssi = rssiRaw === '' ? 0 : +rssiRaw;
+  const mbps = +grab(/Link speed:\s*(\d+)/) || 0;
+  const std = grab(/Wi-Fi standard:\s*(\S+?)(?:,|$)/);
+
+  return { ssid, freq, ch: freq ? chanOf(freq) : 0, rssi, mbps, std };
+}
+
+/* ---------- gateway / L3 ---------- */
+async function collectNet() {
+  const net = { gateway: '', loss: null, rtt: null, dns: 'unknown' };
+
+  /* No awk here either: parsing 'default via X dev Y' is two tokens, and the
+     page is where parsing belongs now. */
+  const r = await sh('ip route 2>/dev/null');
+  const def = ((r.out || '').split('\n').find(l => /^default/.test(l)) || '').trim();
+  const via = def.match(/^default\s+via\s+(\S+)/);
+  net.gateway = via ? via[1] : '';
+
+  if (net.gateway) {
+    const p = await sh('ping -c 5 -i 0.2 -W 1 ' + net.gateway + ' 2>/dev/null');
+    const pl = (p.out || '').match(/(\d+)% packet loss/);
+    if (pl) net.loss = +pl[1];
+    const rt = (p.out || '').match(/rtt [^=]*= ([\d.]+)\/([\d.]+)/);
+    if (rt) net.rtt = +rt[2];                       /* avg, not max */
+  }
+
+  /* One lookup tests DNS and reachability together. */
+  const d = await sh('ping -c 1 -W 2 github.com >/dev/null 2>&1; echo $?');
+  net.dns = ((d.out || '').trim().split('\n').pop() === '0') ? 'ok' : 'fail';
+  return net;
+}
+
+/* ---------- interference scoring ----------
+   Counting APs per channel lies: five APs at -80 are harmless, one at -25 is
+   not. Sum linear power instead, co-channel full weight and +/-4 channels
+   (the 20MHz mask overlap) a quarter. */
+function scoreChannels(rows) {
+  const load = {}, co = {}, adj = {}, seen = {};
+  const add = (c) => { if (!(c in load)) { load[c] = 0; co[c] = 0; adj[c] = 0; } };
+
+  rows.forEach(a => {
+    const p = Math.pow(10, a.rssi / 10);
+    add(a.ch); co[a.ch]++; load[a.ch] += p; seen[a.ch] = 1;
+    for (let d = -4; d <= 4; d++) {
+      if (d === 0) continue;
+      const k = a.ch + d;
+      if (k < 1) continue;
+      add(k); adj[k]++; load[k] += p / 4;
+    }
+  });
+
+  /* Candidates must be channels a radio can actually be set to: the standard
+     grids only, plus any that were really observed.
+
+     Not Object.keys(load): that map also holds the +/-4 spill from the
+     adjacency weighting, so seeding from it proposes ch45, ch46, ch50, ch146...
+     Those are not channels - 5GHz channels are 4 apart - and on real data the
+     tool recommended ch49. */
+  const cand = new Set();
+  Object.keys(seen).forEach(c => cand.add(+c));
+  if (rows.some(a => a.band === '2.4')) for (let c = 1; c <= 13; c++) cand.add(c);
+  if (rows.some(a => a.band === '5')) {
+    for (let c = 36; c <= 64; c += 4) cand.add(c);
+    for (let c = 100; c <= 144; c += 4) cand.add(c);
+    for (let c = 149; c <= 165; c += 4) cand.add(c);
+  }
+
+  const out = [...cand].map(c => ({
+    ch: c, load: load[c] || 0, co: co[c] || 0, adj: adj[c] || 0,
+    dfs: isDfs(c) ? 1 : 0, seen: seen[c] ? 1 : 0
+  }));
+
+  /* Order: 5GHz before 2.4GHz, then non-DFS before DFS, then least
+     interference, then observed channels, then channel number.
+
+     Band first: 2.4GHz has three usable channels shared with every neighbour
+     in range, so a "clean" ch1 is a worse pick than a busy 5GHz channel.
+     DFS next: an empty DFS channel scores zero but is the worst advice we can
+     give - passive scan only, and a radar hit vacates it. Ranking on load
+     alone answered "ch 108" (an empty DFS channel) on real data. */
+  out.sort((a, b) => {
+    if ((a.ch > 34) !== (b.ch > 34)) return a.ch > 34 ? -1 : 1;
+    if (a.dfs !== b.dfs) return a.dfs - b.dfs;
+    if (a.load !== b.load) return a.load - b.load;
+    if (a.seen !== b.seen) return b.seen - a.seen;
+    return a.ch - b.ch;
+  });
+  return out;
+}
+
+function quality(r) {
+  if (r >= -50) return 'excellent';
+  if (r >= -60) return 'good';
+  if (r >= -70) return 'fair';
+  return 'weak';
+}
+
+/* ---------- assemble the whole picture ---------- */
+function analyse(rows, link, net) {
+  const n = rows.length;
+  const count = (f) => rows.filter(f).length;
+  const dfsCh = [...new Set(rows.filter(a => a.dfs).map(a => a.ch))].sort((x, y) => x - y);
+
+  /* Strongest BSSID per SSID for the AP table (hidden ones keep a slot). */
+  const bySsid = new Map();
+  rows.forEach(a => {
+    const key = a.ssid || '\u0000hidden';
+    const prev = bySsid.get(key);
+    if (!prev || a.rssi > prev.rssi) bySsid.set(key, a);
+  });
+  const aps = [...bySsid.values()].sort((a, b) => b.rssi - a.rssi);
+
+  const best = aps[0] || {};
+
+  /* Congestion counts raw BSSIDs, not SSIDs: one SSID on five radios still
+     occupies the channel five times. */
+  const cong = {};
+  rows.forEach(a => { cong[a.ch] = (cong[a.ch] || 0) + 1; });
+  const congestion = Object.keys(cong).map(c => ({ ch: +c, count: cong[c] }))
+    .sort((a, b) => b.count - a.count || a.ch - b.ch);
+
+  /* Multi-BSSID SSIDs mean mesh / roaming, which changes the advice. */
+  const bssPerSsid = {};
+  rows.forEach(a => {
+    if (!a.ssid) return;
+    bssPerSsid[a.ssid] = (bssPerSsid[a.ssid] || 0) + 1;
+  });
+  const roam = Object.keys(bssPerSsid).filter(s => bssPerSsid[s] > 1)
+    .map(s => ({ ssid: s, bssids: bssPerSsid[s] }));
+
+  const scores = scoreChannels(rows);
+  const n5 = count(a => a.band === '5');
+
+  const dfsVerdict = (n5 > 0 && dfsCh.length > 0) ? 'ok' : (n5 > 0 ? 'none' : 'nodata');
+  const netVerdict = net.loss === null ? 'nogw' : (net.loss === 0 ? 'ok' : 'lossy');
+
+  return {
+    /* The link/L3 numbers are carried at the top level because the renderer
+       reads them as scalars. Dropping them here made the network card silently
+       show "未获取" even when the gateway ping had succeeded. */
+    gateway: net.gateway, loss: net.loss, rtt: net.rtt,
+    summary: {
+      total: n,
+      n24: count(a => a.band === '2.4'), n5, n6: count(a => a.band === '6'),
+      ndfs: count(a => a.dfs),
+      nunii2a: count(a => a.unii === 'UNII-2A'),
+      nunii2c: count(a => a.unii === 'UNII-2C'),
+      nunii3: count(a => a.unii === 'UNII-3'),
+      nwpa3: count(a => a.wpa3), nopen: count(a => a.open)
+    },
+    best: { rssi: best.rssi || 0, ssid: best.ssid || '', freq: best.freq || 0 },
+    link: link || { ssid: '', freq: 0, ch: 0, rssi: 0, mbps: 0, std: '' },
+    ageMax: rows.reduce((m, a) => Math.max(m, a.age || 0), 0),
+    dfsCh, aps, congestion, roam, scores,
+    verdict: {
+      dfs: dfsVerdict, net: netVerdict,
+      dns: net.dns, best_ch: scores.length ? scores[0].ch : null
+    }
+  };
+}
+
+/* Collect everything. Each source independent so one failure is reported
+   rather than blanking the page. */
+async function measure() {
+  const scan = await sh('cmd wifi list-scan-results 2>&1');
+  const link = await sh('cmd wifi status 2>&1');
+  const net = await collectNet();
+
+  const rows = parseScan(scan.out);
+  if (!rows.length) {
+    return { error: 'empty-scan', raw: scan.out, err: scan.err };
+  }
+  return analyse(rows, parseLink(link.out), net);
+}
+/* === end DIAG === */
 const $ = id => document.getElementById(id);
 let MODDIR = '/data/adb/modules/KsuFastSurfing';
 let MGR = MODDIR + '/manager.sh';
@@ -302,129 +572,114 @@ function parseKV(txt) {
   return m;
 }
 
-/* The diagnostic output is JSON, produced by wifidiag.awk in a single pass.
-   Do not go back to a delimiter protocol: SSIDs can legitimately contain '|',
-   '=', quotes and backslashes, and splitting on any of them silently shifts
-   every following column (a real AP named "ap fake=1|2" parsed as
-   freq=2 ch=5745 rssi=149 with the old key=value format). */
-function parseDiag(txt) {
-  let d = null;
-  try { d = JSON.parse(txt); } catch (e) { d = null; }
-  if (!d) return { ap: [], free: [], score: [], kv: {}, error: 'bad-json' };
-  const s = d.summary || {}, l = d.link || {}, net = d.net || {}, v = d.verdict || {};
+/* Data comes from the page itself (see the DIAG block above): the bridge runs
+   commands as root, so no script is involved and no intermediate file has to
+   stay in sync. Never parse this text by splitting on a delimiter - SSIDs can
+   contain '|', '=', quotes and backslashes, and a real AP named "ap fake=1|2"
+   parsed as freq=2 ch=5745 rssi=149 under the old key=value format. */
+let lastDiag = null;
 
-  /* Flatten into the kv map the renderers use, so the layout code stays put
-     and there is exactly one place that knows the JSON shape. */
-  const kv = {
-    total: s.total, n24: s.n24, n5: s.n5, n6: s.n6,
-    ndfs: s.ndfs, nu3: s.nunii3, nu2c: s.nunii2c, nu2a: s.nunii2a,
-    best_rssi: (d.best || {}).rssi, best_ssid: (d.best || {}).ssid,
-    best_freq: (d.best || {}).freq,
-    freq: l.freq, conn_ch: l.channel, rssi: l.rssi,
-    conn_quality: l.quality, link_mbps: l.link_mbps, standard: l.standard,
-    ssid: d.link_ssid || '',
-    age_max: (d.scan || {}).age_max, aps: (d.scan || {}).aps,
-    dfs_ch: ((d.channels || {}).dfs || []).join(' '),
-    gw: net.gateway, loss: net.loss, gw_rtt: net.rtt_ms, dns: net.dns,
-    multi: (d.roam || {}).multi,
-    dfs: v.dfs, net: v.net, dns_l3: v.dns_l3, best_ch: v.best_ch
-  };
+async function loadDiag(showError) {
+  const d = await measure();
+  if (d.error) {
+    if (showError) out('未取得扫描数据（' + d.error + '）。先点「重新扫描」，或确认设备已联网。');
+    return false;
+  }
+  lastDiag = d;
+  render(d);
+  return true;
+}
 
-  /* The old text format carried a prose hint; derive it from the verdict so
-     the wording lives in one language only. */
-  if (v.dfs === 'ok') kv.note = 'DFS 信道可见；若设置界面仍看不到，属于展示/缓存问题，手动添加网络即可连';
-  else if (v.dfs === 'none') kv.note = '附近没有 DFS AP；可靠近路由器后重新扫描';
-  else if (v.dfs === 'nodata') kv.note = '完全没有扫到 5GHz';
 
-  const free = (d.congestion || []).map(x => ({ ch: String(x.ch), n: x.count }));
-  return { ap: d.aps || [], free, score: d.score || [], kv, error: null };
+/* Presentation only. Takes the object produced by analyse() and writes it out.
+   Every value here comes from measurement, so a missing field means "not
+   measured" and renders as an em dash rather than 0. */
+function render(d) {
+  const s = d.summary, l = d.link, v = d.verdict;
+
+  /* --- overview: connected link --- */
+  setV($('o-ssid'), l.ssid || '未连接');
+  setV($('o-freq'), l.freq ? (l.freq + ' MHz / ch ' + l.ch) : '—');
+  setV($('o-rssi'), l.rssi ? (l.rssi + ' dBm · ' + quality(l.rssi)) : '—',
+       l.rssi ? qcls(l.rssi) : '');
+  setV($('o-link'), l.mbps ? (l.mbps + ' Mbps') : '—');
+  setV($('o-std'), l.std ? ('Wi-Fi ' + l.std) : '—');
+
+  /* --- overview: neighbourhood --- */
+  setV($('o-total'), s.total);
+  setV($('o-24'), s.n24);
+  setV($('o-5'), s.n5);
+  setV($('o-dfs'), s.ndfs, s.ndfs > 0 ? 'ok' : '');
+  $('o-note').textContent =
+    v.dfs === 'ok' ? 'DFS 信道可见；若设置界面仍看不到，属于展示/缓存问题，手动添加网络即可连' :
+    v.dfs === 'none' ? '附近没有 DFS AP；可靠近路由器后重新扫描' :
+    '完全没有扫到 5GHz';
+
+  /* --- recommended channel --- */
+  const top = d.scores.length ? d.scores[0].load : 0;
+  $('o-free').innerHTML = d.scores.slice(0, 6).map(x => {
+    const pct = top > 0 ? Math.max(2, Math.round(100 * x.load / top)) : 2;
+    const tag = x.dfs ? '<span class="tag dfs">DFS</span>' :
+                (x.ch >= 149 ? '<span class="tag u3">U3</span>' : '');
+    return `<tr><td>${x.ch}</td><td class="n">${fmtLoad(x.load)}</td>
+      <td class="n">${x.co}</td><td class="n">${x.adj}</td>
+      <td style="width:38%">${tag}<div class="bar"><i style="width:${pct}%"></i></div></td></tr>`;
+  }).join('') || '<tr><td>—</td></tr>';
+  setV($('o-pick'), v.best_ch != null ? ('ch ' + v.best_ch) : '无数据',
+       v.best_ch != null ? 'ok' : 'bad');
+
+  /* --- link freshness + L3 --- */
+  setV($('n-age'), (d.ageMax.toFixed(0) + ' 秒前 · ' + s.total + ' AP'),
+       d.ageMax <= 20 ? 'ok' : 'warn');
+  setV($('n-gw'), d.gateway || '未获取');
+  setV($('n-loss'), d.loss == null ? '—' : (d.loss + '%'),
+       d.loss == null ? '' : (d.loss === 0 ? 'ok' : 'bad'));
+  setV($('n-rtt'), d.rtt == null ? '—' : (d.rtt + ' ms'),
+       d.rtt == null ? '' : (d.rtt <= 10 ? 'ok' : 'warn'));
+  setV($('n-dns'), v.dns === 'ok' ? '正常' : (v.dns === 'fail' ? '失败' : '未知'),
+       v.dns === 'ok' ? 'ok' : (v.dns === 'fail' ? 'bad' : ''));
+  setV($('n-roam'), d.roam.length ? (d.roam.length + ' 个 SSID') : '无',
+       d.roam.length ? 'ok' : '');
+
+  /* --- strongest neighbours --- */
+  $('o-best').innerHTML = d.aps.slice(0, 5).map(a =>
+    `<tr><td>${esc(a.ssid) || '(隐藏)'}</td><td>${a.ch}</td>
+     <td class="n ${qcls(a.rssi)}">${a.rssi}</td></tr>`).join('') || '<tr><td>—</td></tr>';
+
+  /* --- channel page --- */
+  $('ap-count').textContent = s.total + ' AP';
+  $('ap-rows').innerHTML = d.aps.slice(0, 40).map(a => {
+    const t = a.dfs ? '<span class="tag dfs">DFS</span>' :
+              (a.unii === 'UNII-3' ? '<span class="tag u3">UNII-3</span>' :
+               '<span class="tag">' + esc(a.unii || '普通') + '</span>');
+    return `<tr><td>${esc(a.ssid) || '(隐藏)'}</td><td>${a.ch}</td><td>${a.freq}</td>
+            <td class="n ${qcls(a.rssi)}">${a.rssi}</td><td>${t}</td></tr>`;
+  }).join('') || '<tr><td>—</td></tr>';
+  setV($('d-ndfs'), s.ndfs + ' 个', s.ndfs > 0 ? 'ok' : 'bad');
+  setV($('d-u2a'), s.nunii2a + ' 个');
+  setV($('d-u2c'), s.nunii2c + ' 个', s.nunii2c > 0 ? 'ok' : 'bad');
+  setV($('d-ch'), d.dfsCh.length ? d.dfsCh.join(' ') : '无');
+
+  /* --- country page --- */
+  setV($('c-5g'), s.n5 + ' 个');
+  setV($('c-unii2c'), s.nunii2c + ' 个', s.nunii2c > 0 ? 'ok' : 'bad');
+  setV($('c-unii3'), s.nunii3 + ' 个');
+}
+
+/* Interference sums span many orders of magnitude (one -25 dBm AP is ~30k
+   times a -70 dBm one), so a raw number is unreadable. Show one decimal and
+   let the bar carry the ratio. */
+function fmtLoad(v) {
+  if (v == null) return '0';
+  if (v < 1000) return v.toFixed(0);
+  if (v < 1e6) return (v / 1000).toFixed(1) + 'k';
+  return (v / 1e6).toFixed(1) + 'M';
 }
 
 function qcls(r) {
   if (r >= -50) return 'ok';
   if (r >= -65) return 'warn';
   return 'bad';
-}
-
-let lastDiag = null;
-
-async function loadDiag() {
-  const r = await run('sh ' + MGR + ' wifi json 2>&1');
-  if (r === null) return;
-  const d = parseDiag(r);
-  if (d.error) { out('诊断数据解析失败（' + d.error + '），请运行 manager.sh wifi 查看原始输出'); return; }
-  lastDiag = d;
-  const kv = d.kv;
-
-  /* overview */
-  setV($('o-ssid'), kv.ssid || '未连接');
-  const f = +(kv.best_freq || 0);
-  const ch = f ? (f <= 2500 ? ((f == 2484) ? 14 : Math.floor((f - 2407) / 5)) : Math.floor((f - 5000) / 5)) : 0;
-  /* the connected link is not the same thing as the strongest neighbour */
-  const cf = +(kv.freq || 0);
-  setV($('o-freq'), cf ? (cf + ' MHz / ch ' + (kv.conn_ch || '?')) : '—');
-  const cr = +(kv.rssi || 0);
-  setV($('o-rssi'), cr ? (cr + ' dBm · ' + (kv.conn_quality || '')) : '—', cr ? qcls(cr) : '');
-  setV($('o-link'), kv.link_mbps ? (kv.link_mbps + ' Mbps') : '—');
-  setV($('o-std'), kv.standard ? ('Wi-Fi ' + kv.standard) : '—');
-
-  setV($('o-total'), kv.total || 0);
-  setV($('o-24'), kv.n24 || 0);
-  setV($('o-5'), kv.n5 || 0);
-  setV($('o-dfs'), kv.ndfs || 0, +(kv.ndfs||0) > 0 ? 'ok' : '');
-  $('o-note').textContent = kv.note || '';
-
-  const top = d.score.length ? d.score[0].load : 0;
-  $('o-free').innerHTML = d.score.slice(0, 6).map(s => {
-    const pct = top > 0 ? Math.max(2, Math.round(100 * s.load / top)) : 2;
-    const tag = s.dfs ? '<span class="tag dfs">DFS</span>' :
-                (s.ch >= 149 ? '<span class="tag u3">U3</span>' : '');
-    return `<tr><td>${s.ch}</td><td class="n">${s.load}</td>
-      <td class="n">${s.co}</td><td class="n">${s.adj}</td>
-      <td style="width:38%">${tag}<div class="bar"><i style="width:${pct}%"></i></div></td></tr>`;
-  }).join('') || '<tr><td>—</td></tr>';
-  setV($('o-pick'), (kv.best_ch && kv.best_ch !== 'none') ? ('ch ' + kv.best_ch) : '无数据',
-       (kv.best_ch && kv.best_ch !== 'none') ? 'ok' : 'bad');
-
-  /* link freshness + L3 */
-  const age = +(kv.age_max || 0);
-  setV($('n-age'), kv.aps ? (age + ' 秒前 · ' + kv.aps + ' AP') : '—',
-       kv.aps ? (age <= 20 ? 'ok' : 'warn') : '');
-  setV($('n-gw'), (kv.gw && kv.gw !== 'none') ? kv.gw : '未获取');
-  /* JSON yields null for "not measured", which the text format expressed as
-     the string 'none'. Both must render as em dash, never as "null%". */
-  const loss = kv.loss;
-  const hasLoss = loss !== null && loss !== undefined && loss !== 'none';
-  setV($('n-loss'), hasLoss ? (loss + '%') : '—', hasLoss ? (+loss === 0 ? 'ok' : 'bad') : '');
-  const hasRtt = kv.gw_rtt !== null && kv.gw_rtt !== undefined && kv.gw_rtt !== 'none';
-  setV($('n-rtt'), hasRtt ? (kv.gw_rtt + ' ms') : '—', hasRtt ? (+kv.gw_rtt <= 10 ? 'ok' : 'warn') : '');
-  const dns = kv.dns_l3 || kv.dns;
-  setV($('n-dns'), dns === 'ok' ? '正常' : (dns === 'fail' ? '失败' : '未知'),
-       dns === 'ok' ? 'ok' : (dns === 'fail' ? 'bad' : ''));
-  setV($('n-roam'), +(kv.multi || 0) > 0 ? (kv.multi + ' 个 SSID') : '无',
-       +(kv.multi || 0) > 0 ? 'ok' : '');
-
-  $('o-best').innerHTML = d.ap.slice(0, 5).map(a =>
-    `<tr><td>${esc(a.ssid) || '(隐藏)'}</td><td>${a.ch}</td>
-     <td class="n ${qcls(a.rssi)}">${a.rssi}</td></tr>`).join('') || '<tr><td>—</td></tr>';
-
-  /* channel page */
-  $('ap-count').textContent = (kv.total || 0) + ' AP';
-  $('ap-rows').innerHTML = d.ap.slice(0, 40).map(a => {
-    const t = a.dfs ? '<span class="tag dfs">DFS</span>' :
-              (a.ch >= 149 ? '<span class="tag u3">UNII-3</span>' : '<span class="tag">普通</span>');
-    return `<tr><td>${esc(a.ssid) || '(隐藏)'}</td><td>${a.ch}</td><td>${a.freq}</td>
-            <td class="n ${qcls(a.rssi)}">${a.rssi}</td><td>${t}</td></tr>`;
-  }).join('') || '<tr><td>—</td></tr>';
-  setV($('d-ndfs'), (kv.ndfs || 0) + ' 个', +(kv.ndfs||0) > 0 ? 'ok' : 'bad');
-  setV($('d-u2a'), (kv.nu2a || 0) + ' 个');
-  setV($('d-u2c'), (kv.nu2c || 0) + ' 个');
-  setV($('d-ch'), (kv.dfs_ch || '').trim() || '无');
-
-  /* country page */
-  setV($('c-5g'), (kv.n5 || 0) + ' 个');
-  setV($('c-unii2c'), (kv.nu2c || 0) + ' 个', +(kv.nu2c||0) > 0 ? 'ok' : 'bad');
-  setV($('c-unii3'), (kv.nu3 || 0) + ' 个');
 }
 
 async function loadStatus() {
@@ -455,7 +710,11 @@ async function loadManual() {
   try { $('h-manual').value = decodeURIComponent(escape(atob(b))); } catch (e) { $('h-manual').value = ''; }
 }
 
-async function refreshAll() { await loadStatus(); await loadDiag(); }
+async function refreshAll() {
+  await loadStatus();
+  const ok = await loadDiag(true);
+  if (!ok && lastDiag) render(lastDiag);   /* keep the last good picture */
+}
 
 function busy(btn, fn) {
   return async () => {
@@ -465,10 +724,13 @@ function busy(btn, fn) {
 }
 
 /* ---------- actions ---------- */
+/* A real scan takes a few seconds, so the button is disabled for the wait and
+   the result is re-measured afterwards rather than trusting the scan call. */
 $('btn-scan').onclick = busy($('btn-scan'), async () => {
-  out('扫描中…');
-  const r = await run('cmd wifi start-scan; sleep 6; sh ' + MGR + ' wifi json 2>&1');
-  out(r === null ? '无法执行' : '扫描完成');
+  out('扫描中，请等待约 6 秒…');
+  await run('cmd wifi start-scan');
+  await new Promise(r => setTimeout(r, 6000));
+  out('扫描完成');
 });
 
 $('h-use').onchange = async () => {
@@ -532,7 +794,7 @@ function clamp(v, a, b) { return isNaN(v) ? a : Math.max(a, Math.min(b, v)); }
 (async function init() {
   if (!hasKsu()) {
     out('未检测到 KernelSU WebUI 接口。请从管理器打开本模块的 WebUI。\n' +
-        '命令行：sh ' + MGR + ' wifi json');
+        '命令行：sh ' + MGR + ' wifi');
     return;
   }
   await resolveModDir();

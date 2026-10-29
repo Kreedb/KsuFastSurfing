@@ -63,8 +63,17 @@ collect() {
 # with '|', which silently reshuffled columns for any SSID containing '|' or
 # '='. One awk pass also means the text report and the JSON document are
 # rendered from the same computed state and cannot drift apart.
+# The one formatted-data file. Every consumer (WebUI, other scripts, a human
+# with `cat`) reads this, and nothing else parses the raw dumps. Text output is
+# a rendering of the same computation, never a second implementation.
+JSON_OUT="$D/report.json"
+
+# Android's awk has no strftime(), so the timestamp is formatted here and passed
+# in. See the note in wifidiag.awk.
+now_iso() { date '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo unknown; }
+
+# $1 = text|json ; result goes to stdout
 run_report() {
-  # $1 = text|json
   [ -s "$RAW/scan.txt" ] || {
     if [ "$1" = "json" ]; then
       printf '{"schema":%d,"error":"no-scan","summary":{"total":0}}\n' 1
@@ -73,28 +82,60 @@ run_report() {
     fi
     return 1
   }
-  # link.txt / net.txt may be absent (not connected, no gateway); awk skips a
-  # missing file rather than failing.
+  # link.txt / net.txt may be absent (not connected, no gateway); awk skips an
+  # empty file rather than failing.
   for f in "$RAW/link.txt" "$RAW/net.txt"; do
     [ -f "$f" ] || : > "$f"
   done
-  awk -f "$MODDIR/jsonlib.awk" -f "$MODDIR/wifidiag.awk" -v out_fmt="$1" \
+  awk -f "$MODDIR/jsonlib.awk" -f "$MODDIR/wifidiag.awk" \
+    -v out_fmt="$1" -v ts="$(now_iso)" \
     "$RAW/scan.txt" "$RAW/link.txt" "$RAW/net.txt"
 }
 
-report()      { run_report text; }
-json_report() { run_report json; }
+# Regenerate report.json atomically. A half-written file would make the WebUI
+# fail to parse while a scan is running, so write to a temp name first.
+build_json() {
+  tmp="$JSON_OUT.$$"
+  if run_report json > "$tmp" 2>"$D/json.err"; then
+    mv -f "$tmp" "$JSON_OUT"
+    return 0
+  fi
+  log "json build failed: $(cat "$D/json.err" 2>/dev/null)"
+  rm -f "$tmp"
+  return 1
+}
+
+json_report() {
+  # Prefer the cached file: the WebUI should show what was measured, and a
+  # re-read keeps the page fast. Fall back to computing if it is missing.
+  if [ -s "$JSON_OUT" ]; then cat "$JSON_OUT"; else build_json && cat "$JSON_OUT"; fi
+}
+
+report() { run_report text; }
 
 case "$1" in
   collect) collect ;;
   report)  report ;;
   raw)     report ;;
   json)
+    # Full cycle: measure, then rewrite report.json, then print that same file.
     collect >/dev/null
-    json_report
+    build_json || exit 1
+    cat "$JSON_OUT"
     ;;
   json-cached)
-    json_report
+    # No measuring: render whatever is in diag/raw and refresh report.json.
+    build_json || exit 1
+    cat "$JSON_OUT"
+    ;;
+  json-file)
+    # Path of the formatted data file, for other scripts to consume.
+    [ -s "$JSON_OUT" ] || { collect >/dev/null; build_json || exit 1; }
+    echo "$JSON_OUT"
+    ;;
+  rebuild)
+    build_json || exit 1
+    echo "$JSON_OUT"
     ;;
   scan|"")  collect >/dev/null; report ;;
   api)
@@ -106,5 +147,5 @@ case "$1" in
   api-cached)
     report
     ;;
-  *) echo "usage: wifidiag.sh {scan|collect|report|json|api}"; exit 2 ;;
+  *) echo "usage: wifidiag.sh {scan|collect|report|json|json-file|rebuild|api}"; exit 2 ;;
 esac
