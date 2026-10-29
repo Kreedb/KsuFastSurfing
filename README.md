@@ -117,7 +117,9 @@ remount   重新 bind mount
 refresh   下载 + build + remount + 应用国家码
 apply     build + remount
 set-cc XX 写 config / system.prop 并立即生效
-status    机器可读状态（供 WebUI 消费）
+regdom    只把国家码推给内核（iw reg set）
+diagnose  四层信道诊断全量转储
+cc-check  四层国家码/信道状态摘要
 ```
 
 `post-fs-data` / `service` / `action` / WebUI 全部只是调它，没有第二份逻辑。
@@ -163,6 +165,7 @@ KsuFastSurfing/
     ├── service.sh       开机后：异步刷新
     ├── action.sh        管理器「运行」按钮
     ├── uninstall.sh     清理
+    ├── diagnose.sh      四层信道诊断（只读）
     ├── customize.sh     安装期权限设置
     ├── system.prop      国家码属性
     ├── hosts            合并产物（由 manager.sh build 生成）
@@ -314,7 +317,55 @@ sh /data/adb/modules/KsuFastSurfing/manager.sh status
 | `mounted=0` | 未重启；或 SELinux 阻止 bind mount（看 `mount.log`） |
 | hosts 生效但没加速 | 运营商/DNS 走了 DoT/DoH，绕过 hosts |
 | 国家码不生效 | 厂商 ROM 固定了 `ro.boot.wificountrycode`；或 `cmd wifi` 返回格式不同（看 `manager.log`） |
+| 国家码生效但无信道 100–144 | `manager.sh cc-check`；若 `unii2c=no` 则是固件层硬限制，软件无解 |
 | 云端刷新失败 | 代理不可用；此时保留旧缓存，不影响使用 |
+
+## 5GHz / DFS 信道（重要）
+
+**改了国家码仍然搜不到信道 100–144，通常不是模块没生效。**
+
+信道 100–144 属于 **UNII-2C（5470–5725 MHz）**，在美国被划为 **DFS** 频段
+（要与气象/军用雷达共存）。它受四层约束，而 `cmd wifi` 只能影响第一层：
+
+| 层 | 谁在管 | 能否从 root 改 |
+|---|---|---|
+| 1. framework | WifiService / `cmd wifi` | 能（本模块已做） |
+| 2. kernel regdb | cfg80211 / `iw reg set` | 能（本模块已做，但常被厂商驱动忽略） |
+| 3. 驱动/固件 | 厂商 BDF / `WCNSS_qcom_cfg.ini` | 部分能（本模块尝试 overlay） |
+| 4. 射频能力 | 硬件与固件实际支持的信道表 | **不能** |
+
+判断卡在第几层，跑一条命令即可：
+
+```sh
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh cc-check'
+```
+
+输出示例（卡在固件层）：
+
+```
+framework=US     # 框架认为是美国
+kernel=00        # 内核却是"世界域"，最典型
+unii2c=no        # PHY 根本没登记 100-144
+dfs=no           # 扫描也看不到 DFS AP
+config=US
+```
+
+若 `unii2c=no`，说明固件的信道表里压根没有 UNII-2C，
+**没有任何国家码设置能让这些信道出现** —— 这是认证与射频能力的硬边界，不是软件开关。
+
+完整四层转储（含 `iw reg get`、PHY 信道表、vendor ini）：
+
+```sh
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'
+# 结果同时写入 /data/adb/modules/KsuFastSurfing/diagnose.log
+```
+
+### DFS 对被扫描方的额外限制
+
+即便信道出现在表里，标了 `radar detection` 的信道**默认只能被动扫描**：
+设备不主动发探测帧，只能等 AP 自己发信标。所以 DFS AP 的发现会明显偏慢，
+或者"要等一会儿才出现"。如果 AP 隐藏了 SSID，被动扫描永远发现不了它 ——
+这种情况只能手动添加网络（输入 SSID 与密码），手机才会去那个信道尝试关联。
 
 ## 已知限制
 

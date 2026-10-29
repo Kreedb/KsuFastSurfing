@@ -25,7 +25,7 @@ src, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 # Executables must keep 0755; data files must be 0644.
 EXEC = {
     "post-fs-data.sh", "service.sh", "action.sh",
-    "uninstall.sh", "customize.sh", "manager.sh",
+    "uninstall.sh", "customize.sh", "manager.sh", "diagnose.sh",
 }
 # Runtime artifacts never ship.
 SKIP = {"manager.log", "mount.log", "service.log"}

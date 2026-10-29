@@ -166,6 +166,35 @@ cmd_apply_cc() {
   return 1
 }
 
+cmd_apply_regdom() {
+  # cmd wifi only tells the framework. Push the same code into cfg80211 so the
+  # kernel channel table follows. Both are best-effort: on most phones the
+  # vendor WLAN driver keeps its own domain and ignores this.
+  cc=$(conf_get CC US)
+  cc=$(echo "$cc" | tr 'a-z' 'A-Z' | tr -cd 'A-Z')
+  [ ${#cc} -eq 2 ] || { echo "regdom=skipped"; return 1; }
+  got=""
+
+  if command -v iw >/dev/null 2>&1; then
+    dev=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
+    if [ -n "$dev" ]; then
+      # iw reg set writes the global domain via nl80211
+      iw reg set "$cc" 2>>"$LOG" && got=iw
+    fi
+    iw reg get 2>/dev/null | grep -q "country $cc" && got="${got:-iw}"
+  fi
+
+  # Legacy interface, still honoured by some vendor drivers.
+  if command -v iwconfig >/dev/null 2>&1 && [ -z "$got" ]; then
+    dev=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
+    [ -n "$dev" ] && iwconfig "$dev" reg "$cc" 2>>"$LOG" && got=iwconfig
+  fi
+
+  log "regdom set to $cc via ${got:-nothing}"
+  echo "regdom=${got:-failed}"
+  [ -n "$got" ]
+}
+
 cmd_status() {
   H=/system/etc/hosts
   if [ -f "$OUT" ]; then
@@ -195,6 +224,7 @@ case "$1" in
     cmd_build
     cmd_remount
     cmd_apply_cc >/dev/null 2>&1
+    cmd_apply_regdom >/dev/null 2>&1 || true
     echo "refresh_rc=$rc"
     ;;
   apply)
@@ -216,7 +246,39 @@ case "$1" in
       resetprop -n ro.product.wifi.country "$v" 2>/dev/null || true
     fi
     cmd_apply_cc
+    cmd_apply_regdom >/dev/null 2>&1 || true
     ;;
   status)    cmd_status ;;
-  *) echo "usage: manager.sh {refresh|apply|status|set-cc XX|build|remount}"; exit 2 ;;
+  regdom)    cmd_apply_regdom ;;
+  diagnose)  sh "$MODDIR/diagnose.sh" ;;
+  cc-check)
+    # Report every layer's opinion of the country code, so a "set to US but
+    # still no ch100" case can be traced to the layer that actually blocks.
+    printf 'framework=%s\n' "$(cmd wifi status 2>/dev/null | grep -i 'country code' | head -1 | sed 's/.*: *//' | tr -d '\r')"
+    if command -v iw >/dev/null 2>&1; then
+      printf 'kernel=%s\n' "$(iw reg get 2>/dev/null | grep -o 'country [A-Z0-9][A-Z0-9]' | head -1 | awk '{print $2}')"
+      printf 'unii2c=%s\n' "$( (iw list 2>/dev/null || iw phy 2>/dev/null) | awk '
+        match($0,/\[[0-9]+\]/){c=$0;sub(/.*\[/,"",c);sub(/\].*/,"",c);
+          if(c+0>=100&&c+0<=144){print "yes";found=1;exit}}
+        END{if(!found)print "no"}' )"
+    else
+      printf 'kernel=iw-missing\n'
+      printf 'unii2c=unknown\n'
+    fi
+    # Are DFS-band beacons actually reachable in a scan?
+    dfs=unknown
+    if command -v iw >/dev/null 2>&1; then
+      d=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
+      if [ -n "$d" ]; then
+        if iw dev "$d" scan 2>/dev/null | grep -qE 'freq: 5[4-6][0-9][0-9]'; then
+          dfs=yes
+        else
+          dfs=no
+        fi
+      fi
+    fi
+    printf 'dfs=%s\n' "$dfs"
+    printf 'config=%s\n' "$(conf_get CC US)"
+    ;;
+  *) echo "usage: manager.sh {refresh|apply|status|set-cc XX|regdom|diagnose|cc-check|build|remount}"; exit 2 ;;
 esac

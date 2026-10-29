@@ -1,6 +1,6 @@
 id=KsuFastSurfing
 name=KsuFastSurfing 极速冲浪
-version=v1.2
-versionCode=3
+version=v1.3
+versionCode=4
 author=Kreedb
 description=Systemless hosts acceleration (FCM/mtalk + GitHub) with configurable Wi-Fi country code. Cloud-synced, user-priority merge, bind-mounted over /system/etc/hosts.
