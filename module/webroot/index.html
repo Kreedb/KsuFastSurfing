@@ -18,7 +18,7 @@
     --accent:#4a6cf7; --ok:#22a559; --warn:#c77700; --bad:#d9363e;
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-  body { margin:0; padding:0 0 28px; font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
+  body { margin:0; padding:0; font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
          color:inherit; background:transparent; font-size:14px; }
   header { padding:16px 16px 10px; }
   h1 { font-size:17px; margin:0; letter-spacing:.2px; }
@@ -44,7 +44,6 @@
   .row .k { color:var(--dim); flex:none; }
   .row .v { text-align:right; word-break:break-all; font-variant-numeric:tabular-nums; }
   .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
-  .big { font-size:26px; font-weight:700; font-variant-numeric:tabular-nums; }
   .hosts { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; text-align:center; }
   .hosts div span { display:block; }
   .hosts .n { font-size:19px; font-weight:700; }
@@ -109,7 +108,6 @@
   input:focus, textarea:focus { outline:none; border-color:var(--accent); }
   textarea { min-height:84px; resize:vertical; line-height:1.5; }
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
   label.f { display:block; font-size:11.5px; color:var(--dim); margin:10px 0 5px; }
   pre { background:var(--card); border:1px solid var(--line); border-radius:9px; padding:10px;
         font-size:11px; color:inherit; opacity:.85; overflow:auto; max-height:230px; margin:8px 0 0;
@@ -256,39 +254,34 @@
 <section class="page" id="p-hs">
   <div class="card">
     <h2>状态</h2>
-    <div class="row"><span class="k">本地探测条目</span><span class="v" id="h-probed">—</span></div>
-    <div class="row"><span class="k">手动条目</span><span class="v" id="h-user">—</span></div>
+    <div class="row"><span class="k">条目</span><span class="v" id="h-user">—</span></div>
     <div class="row"><span class="k">生效条目</span><span class="v" id="h-entries">—</span></div>
     <div class="row"><span class="k">/system/etc/hosts</span><span class="v" id="h-mount">—</span></div>
   </div>
 
   <div class="card">
-    <h2>本地探测</h2>
-    <label class="sw"><span>启用探测结果</span><input type="checkbox" id="h-use"></label>
+    <h2>检测 IP <span class="tag" id="h-state">空闲</span></h2>
     <div class="grid2">
       <div>
         <label class="f">超时 (秒)</label>
-        <input type="number" id="h-timeout" min="1" max="20" step="1">
+        <input type="number" id="h-timeout" min="1" max="10" step="1">
       </div>
       <div>
         <label class="f">并发线程</label>
-        <input type="number" id="h-threads" min="1" max="32" step="1">
+        <input type="number" id="h-threads" min="1" max="16" step="1">
       </div>
     </div>
-    <div class="grid2">
-      <button class="act" id="h-probe">探测并应用</button>
-      <button class="act alt" id="h-onlyprobe">仅探测</button>
-    </div>
-    <div class="muted">对本机 DNS 返回的候选 IP 逐个做 TLS 握手测速，保留最快的一个。不下载任何云端 hosts。</div>
+    <button class="act" id="h-probe">检测 IP（结果写入下方编辑框）</button>
+    <div class="muted">只检测、不写文件。检测完把地址追加到下面的编辑框，确认无误再点「保存并应用」。</div>
+    <pre id="h-log" hidden></pre>
   </div>
 
   <div class="card">
-    <h2>手动条目</h2>
+    <h2>hosts 条目</h2>
     <textarea id="h-manual" placeholder="1.2.3.4  example.com&#10;5.6.7.8  another.host"></textarea>
     <button class="act" id="h-save">保存并应用</button>
-    <div class="muted">优先级最高，覆盖探测结果中的同名域名。</div>
+    <div class="muted">写入 user-hosts 并重新挂载 /system/etc/hosts。检测结果不会自动生效。</div>
   </div>
-  <button class="act alt" id="h-remount">重新挂载</button>
 </section>
 
 <!-- ================= 国家码 ================= -->
@@ -317,453 +310,8 @@
   </div>
 </section>
 
+<script src="diag.js"></script>
 <script>
-/* === DIAG (source: webroot/diag.js, inlined by build.sh) === */
-/* ===================================================================
-   Data acquisition and analysis, entirely in the page.
-
-   The WebUI bridge (`ksu.exec`) runs commands as root, so the page can
-   read the same interfaces the shell script used to: `cmd wifi
-   list-scan-results`, `cmd wifi status`, `dumpsys wifi`, `ip route`,
-   `ping`. Parsing them in JS means:
-
-     - no awk on the device to go wrong (Android's awk has no strftime,
-       no math functions, and differs from gawk in gsub escapes)
-     - no temp files, no report.json to keep in sync
-     - the version on screen is always the bytes just measured
-
-   `wifidiag.sh` stays for command-line use, but nothing in this page
-   depends on it.
-   =================================================================== */
-
-/* One shell call per data source. Deliberately separate: a failure in one
-   must not blank the rest, and the UI can report which source failed. */
-async function sh(cmd) {
-  const r = await exec(cmd, { cwd: '/' });
-  return { out: (r.stdout || ''), err: (r.stderr || ''), code: r.errno };
-}
-
-/* Text whose bytes must survive intact.
-
-   SSIDs are arbitrary bytes, not a charset we get to assume: a Chinese or emoji
-   name goes through the WebUI bridge, the shell and the page, and any hop that
-   decodes as Latin-1 turns everything past the first multibyte character into
-   mojibake. Base64 is ASCII-only, so the bytes arrive exactly as the kernel
-   handed them to `cmd wifi` and are decoded once, here. */
-function b64bytes(s) {
-  const bin = atob(String(s || '').replace(/[\s=]+/g, ''));
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  try { return new TextDecoder('utf-8', { fatal: false }).decode(out); }
-  catch (e) { return bin; }
-}
-
-async function shText(cmd) {
-  const r = await sh('(' + cmd + ') 2>&1 | base64');
-  const decoded = b64bytes(r.out);
-  if (decoded) return decoded;
-  /* No base64 on this image: fall back to the raw stream rather than showing
-     an empty page. Same data, just no byte guarantee. */
-  return r.out;
-}
-
-/* ---------- MAC recovery ----------
-   Android 12+ redacts the middle two octets of every BSSID in results returned
-   through the framework (`68:19:**:**:37:c3`) unless the caller holds location
-   access with the location toggle on. That is why the AP list showed asterisks
-   and why two radios under one SSID could not be told apart.
-
-   wpa_supplicant keeps the same scan results with the real addresses, and the
-   page runs as root, so its control interface is reachable. Its output is
-   tab-separated: bssid / frequency / signal / flags / ssid. When the ROM has no
-   wpa_cli the framework value is kept - never invented. */
-const MAC_CMDS = [
-  /* A cached scan is enough; if the supplicant has none, ask it to scan and
-     read again. Both are quiet on failure so the next command runs. */
-  'wpa_cli -i wlan0 scan_results',
-  'wpa_cli -i wlan0 scan_results 2>/dev/null | grep -q "^[0-9a-f]" || ' +
-    '{ wpa_cli -i wlan0 scan >/dev/null 2>&1; sleep 2; }; ' +
-    'wpa_cli -i wlan0 scan_results',
-  'for d in /data/vendor/wifi/wpa/sockets /data/misc/wifi/sockets ' +
-    '/data/vendor/wifi/sockets /data/vendor/wifi/hostapd/sockets; do ' +
-    'wpa_cli -p "$d" -i wlan0 scan_results 2>/dev/null && break; done',
-  'for d in /data/vendor/wifi/wpa/sockets /data/misc/wifi/sockets ' +
-    '/data/vendor/wifi/sockets; do ' +
-    'wpa_cli -p "$d" -i wlan0 scan >/dev/null 2>&1; sleep 2; ' +
-    'wpa_cli -p "$d" -i wlan0 scan_results 2>/dev/null && break; done'
-];
-
-function parseWpa(txt) {
-  const out = [];
-  (txt || '').split('\n').forEach(line => {
-    if (!line || /^bssid/i.test(line.trim())) return;
-    const p = line.split('\t');
-    if (p.length < 3) return;
-    const bssid = p[0].trim(), freq = +p[1], rssi = +p[2];
-    if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(bssid)) return;
-    const ssid = (p[4] || '').replace(/\s+$/, '');
-    out.push({ bssid, freq, rssi, ssid });
-  });
-  return out;
-}
-
-async function readRealMacs() {
-  for (const c of MAC_CMDS) {
-    const txt = await shText(c);
-    const rows = parseWpa(txt);
-    if (rows.length) return rows;
-  }
-  return [];
-}
-
-/* Fill a masked BSSID (and a truncated or garbled name) from the supplicant
-   table.
-
-   Pairing is by frequency and signal, choosing the nearest unmatched candidate.
-   Frequency alone is not enough - two radios on one channel under different
-   names are common - and the name is exactly what may be broken here, so it
-   cannot be the matching key. */
-function fillMacs(rows, real) {
-  if (!real.length) return 0;
-  const used = new Set();
-  let fixed = 0;
-
-  /* A redacted BSSID keeps its first two and last two octets: 68:19:**:**:37:c3
-     can only be 68:19:xx:xx:37:c3. That pin is essentially unique, so matching
-     on it alone is safe. RSSI proximity is only the tie-break when two radios
-     on one band share a vendor prefix. */
-  const fits = (masked, full) => {
-    const m = masked.split(':'), f = full.split(':');
-    if (m.length !== 6 || f.length !== 6) return false;
-    return m.every((x, i) => /\*/.test(x) || x.toLowerCase() === f[i].toLowerCase());
-  };
-
-  rows.forEach(a => {
-    if (!/\*/.test(a.bssid)) return;
-    let best = null, bestd = 1e9;
-    real.forEach((r, i) => {
-      if (used.has(i)) return;
-      if (r.freq !== a.freq) return;
-      if (!fits(a.bssid, r.bssid)) return;
-      const d = Math.abs(r.rssi - a.rssi);
-      if (d < bestd) { bestd = d; best = i; }
-    });
-    /* No address survived the prefix/suffix pin: fall back to the nearest radio
-       on the same channel. 6 dB of slack, because the framework reports link
-       RSSI while the supplicant averages its own level. */
-    if (best === null) {
-      real.forEach((r, i) => {
-        if (used.has(i) || r.freq !== a.freq) return;
-        const d = Math.abs(r.rssi - a.rssi);
-        if (d < bestd) { bestd = d; best = i; }
-      });
-      if (best !== null && bestd > 6) best = null;
-    }
-    if (best === null) return;
-    used.add(best);
-    const r = real[best];
-    a.bssid = r.bssid;
-    fixed++;
-    /* The framework pads and truncates the name column, and a cut can land
-       inside a multibyte character - which is exactly how a Chinese name ends
-       up as its first character plus a replacement glyph. The supplicant prints
-       the raw bytes, so prefer its copy whenever the two disagree. */
-    if (r.ssid && r.ssid !== a.ssid) a.ssid = r.ssid;
-    a.macSource = 'supplicant';
-  });
-  return fixed;
-}
-
-/* ---------- scan cache ----------
-   Stock format, space aligned:
-     BSSID  Frequency  RSSI(link:rssi0/rssi1)  Age(sec)  SSID  Flags
-   SSID is the free-text field, so it is taken as everything between the age
-   column and the first '[' of the Flags column - never by splitting on a
-   delimiter, because an SSID can contain anything. */
-function parseScan(txt) {
-  const rows = [];
-  const lines = (txt || '').split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    if (!raw || !raw.trim()) continue;
-    if (/^\s*BSSID\s+Frequency/i.test(raw)) continue;      // header
-
-    const m = raw.match(/^\s*(\S+)\s+(\d+)\s+(-?\d+)(?:\([^)]*\))?\s+([\d.]+)\s+(.*)$/);
-    if (!m) continue;
-    const bssid = m[1], freq = +m[2], rssi = +m[3], age = parseFloat(m[4]);
-    let rest = m[5];
-
-    /* Flags begin at the first '['. Everything before it is the SSID. */
-    const bracket = rest.indexOf('[');
-    let ssid = bracket >= 0 ? rest.slice(0, bracket).trim() : rest.trim();
-    const flags = bracket >= 0 ? rest.slice(bracket) : '';
-    if (ssid === 'null') ssid = '';
-
-    if (freq < 2400) continue;
-    const band = freq <= 2500 ? '2.4' : (freq <= 5895 ? '5' : '6');
-    const ch = chanOf(freq);
-
-    /* Security as shown in the AP list. Two radios on one SSID can differ
-       here, which is exactly when it matters. */
-    const sec = /SAE/.test(flags) ? 'WPA3' :
-                /RSN/.test(flags) ? 'WPA2' :
-                /WPA/.test(flags) ? 'WPA' : '开放';
-
-    rows.push({
-      bssid, freq, rssi, age, ssid, flags, band, ch, sec,
-      dfs: isDfs(ch) ? 1 : 0,
-      unii: uniiOf(ch),
-      wpa3: /SAE/.test(flags) ? 1 : 0,
-      open: !/RSN|WPA/.test(flags) ? 1 : 0
-    });
-  }
-  return rows;
-}
-
-/* Channel number from frequency. 2484 is ch14; the 5GHz grid is 5MHz from
-   5000, the 6GHz grid 5MHz from 5950. */
-function chanOf(f) {
-  if (f <= 2500) return f === 2484 ? 14 : Math.floor((f - 2407) / 5);
-  if (f <= 5895) return Math.floor((f - 5000) / 5);
-  return Math.floor((f - 5950) / 5);
-}
-
-/* UNII-2A is 52-64, UNII-2C is 100-144 - by channel number, because 5725MHz
-   is exactly ch149 (UNII-3) and a frequency test misclassifies it. */
-function isDfs(c) { return (c >= 52 && c <= 64) || (c >= 100 && c <= 144); }
-function uniiOf(c) {
-  if (c < 36) return '-';
-  if (c <= 64) return 'UNII-2A';
-  if (c <= 144) return 'UNII-2C';
-  return 'UNII-3';
-}
-
-/* ---------- connected link ----------
-   `cmd wifi status` prints one WifiInfo line. Fields are comma separated but
-   SSID is quoted, so a comma inside an SSID would break a naive split. */
-function parseLink(txt) {
-  const line = ((txt || '').split('\n').find(l => /WifiInfo:/.test(l)) || '');
-  if (!line) return null;
-
-  const grab = (re) => { const m = line.match(re); return m ? m[1] : ''; };
-  /* [^"]* stops at the closing quote even when the SSID contains commas. */
-  const ssid = grab(/SSID:\s*"([^"]*)"/);
-  const freq = +grab(/Frequency:\s*(\d+)/) || 0;
-  const rssiRaw = grab(/RSSI:\s*(-?\d+)/);
-  const rssi = rssiRaw === '' ? 0 : +rssiRaw;
-  const mbps = +grab(/Link speed:\s*(\d+)/) || 0;
-  const std = grab(/Wi-Fi standard:\s*(\S+?)(?:,|$)/);
-
-  return { ssid, freq, ch: freq ? chanOf(freq) : 0, rssi, mbps, std };
-}
-
-/* ---------- gateway / L3 ---------- */
-async function collectNet() {
-  const net = { gateway: '', loss: null, rtt: null, dns: 'unknown' };
-
-  /* No awk here either: parsing 'default via X dev Y' is two tokens, and the
-     page is where parsing belongs now. */
-  const r = await sh('ip route 2>/dev/null');
-  const def = ((r.out || '').split('\n').find(l => /^default/.test(l)) || '').trim();
-  const via = def.match(/^default\s+via\s+(\S+)/);
-  net.gateway = via ? via[1] : '';
-
-  if (net.gateway) {
-    const p = await sh('ping -c 5 -i 0.2 -W 1 ' + net.gateway + ' 2>/dev/null');
-    const pl = (p.out || '').match(/(\d+)% packet loss/);
-    if (pl) net.loss = +pl[1];
-    const rt = (p.out || '').match(/rtt [^=]*= ([\d.]+)\/([\d.]+)/);
-    if (rt) net.rtt = +rt[2];                       /* avg, not max */
-  }
-
-  /* One lookup tests DNS and reachability together. */
-  const d = await sh('ping -c 1 -W 2 github.com >/dev/null 2>&1; echo $?');
-  net.dns = ((d.out || '').trim().split('\n').pop() === '0') ? 'ok' : 'fail';
-  return net;
-}
-
-/* ---------- interference scoring ----------
-   Counting APs per channel lies: five APs at -80 are harmless, one at -25 is
-   not. Sum linear power instead, co-channel full weight and +/-4 channels
-   (the 20MHz mask overlap) a quarter. */
-function scoreChannels(rows) {
-  const load = {}, co = {}, adj = {}, seen = {};
-  const add = (c) => { if (!(c in load)) { load[c] = 0; co[c] = 0; adj[c] = 0; } };
-
-  rows.forEach(a => {
-    const p = Math.pow(10, a.rssi / 10);
-    add(a.ch); co[a.ch]++; load[a.ch] += p; seen[a.ch] = 1;
-    for (let d = -4; d <= 4; d++) {
-      if (d === 0) continue;
-      const k = a.ch + d;
-      if (k < 1) continue;
-      add(k); adj[k]++; load[k] += p / 4;
-    }
-  });
-
-  /* Candidates must be channels a radio can actually be set to: the standard
-     grids only, plus any that were really observed.
-
-     Not Object.keys(load): that map also holds the +/-4 spill from the
-     adjacency weighting, so seeding from it proposes ch45, ch46, ch50, ch146...
-     Those are not channels - 5GHz channels are 4 apart - and on real data the
-     tool recommended ch49. */
-  const cand = new Set();
-  Object.keys(seen).forEach(c => cand.add(+c));
-  if (rows.some(a => a.band === '2.4')) for (let c = 1; c <= 13; c++) cand.add(c);
-  if (rows.some(a => a.band === '5')) {
-    for (let c = 36; c <= 64; c += 4) cand.add(c);
-    for (let c = 100; c <= 144; c += 4) cand.add(c);
-    for (let c = 149; c <= 165; c += 4) cand.add(c);
-  }
-
-  const out = [...cand].map(c => ({
-    ch: c, load: load[c] || 0, co: co[c] || 0, adj: adj[c] || 0,
-    dfs: isDfs(c) ? 1 : 0, seen: seen[c] ? 1 : 0
-  }));
-
-  /* Order: 5GHz before 2.4GHz, then non-DFS before DFS, then least
-     interference, then observed channels, then channel number.
-
-     Band first: 2.4GHz has three usable channels shared with every neighbour
-     in range, so a "clean" ch1 is a worse pick than a busy 5GHz channel.
-     DFS next: an empty DFS channel scores zero but is the worst advice we can
-     give - passive scan only, and a radar hit vacates it. Ranking on load
-     alone answered "ch 108" (an empty DFS channel) on real data. */
-  out.sort((a, b) => {
-    if ((a.ch > 34) !== (b.ch > 34)) return a.ch > 34 ? -1 : 1;
-    if (a.dfs !== b.dfs) return a.dfs - b.dfs;
-    if (a.load !== b.load) return a.load - b.load;
-    if (a.seen !== b.seen) return b.seen - a.seen;
-    return a.ch - b.ch;
-  });
-  return out;
-}
-
-function quality(r) {
-  if (r >= -50) return 'excellent';
-  if (r >= -60) return 'good';
-  if (r >= -70) return 'fair';
-  return 'weak';
-}
-
-/* ---------- assemble the whole picture ---------- */
-function analyse(rows, link, net) {
-  const n = rows.length;
-  const count = (f) => rows.filter(f).length;
-  const ages = rows.map(a => a.age || 0).sort((a, b) => a - b);
-  const dfsCh = [...new Set(rows.filter(a => a.dfs).map(a => a.ch))].sort((x, y) => x - y);
-
-  /* Strongest BSSID per SSID for the AP table (hidden ones keep a slot). */
-  const bySsid = new Map();
-  rows.forEach(a => {
-    const key = a.ssid || '\u0000hidden';
-    const prev = bySsid.get(key);
-    if (!prev || a.rssi > prev.rssi) bySsid.set(key, a);
-  });
-  const aps = [...bySsid.values()].sort((a, b) => b.rssi - a.rssi);
-
-  /* Every BSSID, grouped by SSID. One network name is often served by several
-     radios (mesh, repeaters, a router running 2.4 and 5GHz under one name), and
-     seeing them together is the whole point of the AP page. Groups are ordered
-     by their strongest member; members by signal, then channel, so the list
-     does not reshuffle between scans on equal RSSI. */
-  const byName = new Map();
-  rows.forEach(a => {
-    const key = a.ssid || '\u0000hidden';
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key).push(a);
-  });
-  const groups = [...byName.entries()].map(([key, list]) => {
-    list.sort((a, b) => b.rssi - a.rssi || a.ch - b.ch);
-    return {
-      ssid: key === '\u0000hidden' ? '' : key,
-      count: list.length,
-      best: list[0].rssi,
-      chans: [...new Set(list.map(a => a.ch))].sort((x, y) => x - y),
-      bssids: list
-    };
-  }).sort((a, b) => b.best - a.best || (a.ssid < b.ssid ? -1 : 1));
-
-  const best = aps[0] || {};
-
-  /* Congestion counts raw BSSIDs, not SSIDs: one SSID on five radios still
-     occupies the channel five times. */
-  const cong = {};
-  rows.forEach(a => { cong[a.ch] = (cong[a.ch] || 0) + 1; });
-  const congestion = Object.keys(cong).map(c => ({ ch: +c, count: cong[c] }))
-    .sort((a, b) => b.count - a.count || a.ch - b.ch);
-
-  /* Multi-BSSID SSIDs mean mesh / roaming, which changes the advice. */
-  const bssPerSsid = {};
-  rows.forEach(a => {
-    if (!a.ssid) return;
-    bssPerSsid[a.ssid] = (bssPerSsid[a.ssid] || 0) + 1;
-  });
-  const roam = Object.keys(bssPerSsid).filter(s => bssPerSsid[s] > 1)
-    .map(s => ({ ssid: s, bssids: bssPerSsid[s] }));
-
-  const scores = scoreChannels(rows);
-  const n5 = count(a => a.band === '5');
-
-  const dfsVerdict = (n5 > 0 && dfsCh.length > 0) ? 'ok' : (n5 > 0 ? 'none' : 'nodata');
-  const netVerdict = net.loss === null ? 'nogw' : (net.loss === 0 ? 'ok' : 'lossy');
-
-  return {
-    /* The link/L3 numbers are carried at the top level because the renderer
-       reads them as scalars. Dropping them here made the network card silently
-       show "未获取" even when the gateway ping had succeeded. */
-    gateway: net.gateway, loss: net.loss, rtt: net.rtt,
-    summary: {
-      total: n,
-      n24: count(a => a.band === '2.4'), n5, n6: count(a => a.band === '6'),
-      ndfs: count(a => a.dfs),
-      nunii2a: count(a => a.unii === 'UNII-2A'),
-      nunii2c: count(a => a.unii === 'UNII-2C'),
-      nunii3: count(a => a.unii === 'UNII-3'),
-      nwpa3: count(a => a.wpa3), nopen: count(a => a.open)
-    },
-    best: { rssi: best.rssi || 0, ssid: best.ssid || '', freq: best.freq || 0 },
-    link: link || { ssid: '', freq: 0, ch: 0, rssi: 0, mbps: 0, std: '' },
-    /* Freshness, three ways. The old value was the maximum age over all APs,
-       which is dominated by whichever neighbour the radio stopped hearing five
-       minutes ago - it barely moves after a rescan, so "did my scan do
-       anything" was unanswerable. The median describes the cache as a whole and
-       the minimum proves a scan actually landed. */
-    ageMax: ages[ages.length - 1] || 0,
-    ageMin: ages[0] || 0,
-    ageMed: ages.length ? ages[Math.floor(ages.length / 2)] : 0,
-    dfsCh, aps, groups, congestion, roam, scores,
-    verdict: {
-      dfs: dfsVerdict, net: netVerdict,
-      dns: net.dns, best_ch: scores.length ? scores[0].ch : null
-    }
-  };
-}
-
-/* Collect everything. Each source independent so one failure is reported
-   rather than blanking the page. */
-async function measure() {
-  /* Base64 in transit: see shText(). `cmd wifi` output is UTF-8 by contract,
-     but every hop in the WebUI bridge decodes as Latin-1, so a Chinese SSID
-     arrived as garbage. */
-  const scan = await shText('cmd wifi list-scan-results');
-  const link = await shText('cmd wifi status');
-  const net = await collectNet();
-
-  const rows = parseScan(scan);
-  if (!rows.length) {
-    return { error: 'empty-scan', raw: scan, err: '' };
-  }
-  const macs = await readRealMacs();
-  const fixed = fillMacs(rows, macs);
-
-  const d = analyse(rows, parseLink(link), net);
-  d.macFixed = fixed;
-  d.macTotal = rows.filter(a => /\*/.test(a.bssid)).length;
-  return d;
-}
-/* === end DIAG === */
 const $ = id => document.getElementById(id);
 let MODDIR = '/data/adb/modules/KsuFastSurfing';
 let MGR = MODDIR + '/manager.sh';
@@ -777,8 +325,6 @@ let MGR = MODDIR + '/manager.sh';
    st(text, {pct})   - progress bar at a given percentage
    st(text, {ok})    - finished, coloured
    The raw command output still goes to the country-code <pre> for detail. */
-const ST = { cls: '', };
-
 function st(text, opt) {
   const o = opt || {};
   const bar = $('status'), fill = $('status-fill');
@@ -811,32 +357,52 @@ function exec(cmd, options) {
   return new Promise((resolve, reject) => {
     if (!hasKsu()) { reject(new Error('KernelSU WebUI 接口不可用')); return; }
     const cb = '__ksu_cb_' + Date.now() + '_' + (seq++);
-    let done = false;
+    let done = false, timer = 0;
     window[cb] = (errno, stdout, stderr) => {
       if (done) return;
       done = true;
+      clearTimeout(timer);          /* every call used to leave a live timer */
       try { delete window[cb]; } catch (e) { window[cb] = undefined; }
       resolve({ errno, stdout: stdout || '', stderr: stderr || '' });
     };
     try { ksu.exec(cmd, JSON.stringify(options || {}), cb); }
     catch (e) { delete window[cb]; reject(e); }
-    setTimeout(() => {
+    timer = setTimeout(() => {
       if (done) return;
       done = true;
       try { delete window[cb]; } catch (e) { window[cb] = undefined; }
       reject(new Error('执行超时'));
-    }, 180000);
+    }, 120000);
   });
 }
 
+/* stdout only. `run()` used to concatenate stderr, and loadStatus() parsed that
+   blend as key=value - any warning on stderr could be read as a field. */
 async function run(cmd) {
   try {
     const r = await exec(cmd);
-    return (r.stdout || '') + (r.stderr || '');
+    return r.stdout || '';
   } catch (e) {
     out('执行失败：' + (e && e.message ? e.message : e));
     return null;
   }
+}
+
+/* Same, but silent: used for polling, where a transient failure must not write
+   anything into the detail pane. */
+async function runQuiet(cmd) {
+  try { const r = await exec(cmd); return r.stdout || ''; }
+  catch (e) { return ''; }
+}
+
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
+/* UTF-8 -> base64 without the deprecated escape()/unescape() pair. */
+function b64utf8(text) {
+  const bytes = new TextEncoder().encode(String(text));
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
 }
 
 async function resolveModDir() {
@@ -883,17 +449,16 @@ function parseKV(txt) {
    parsed as freq=2 ch=5745 rssi=149 under the old key=value format. */
 let lastDiag = null;
 
-async function loadDiag(showError) {
+async function loadDiag() {
   const d = await measure();
   if (d.error) {
-    if (showError) out('未取得扫描数据（' + d.error + '）。先点「重新扫描」，或确认设备已联网。');
+    out('未取得扫描数据（' + d.error + '）。先点「重新扫描」，或确认设备已联网。');
     return false;
   }
   lastDiag = d;
   render(d);
   return true;
 }
-
 
 /* Presentation only. Takes the object produced by analyse() and writes it out.
    Every value here comes from measurement, so a missing field means "not
@@ -904,8 +469,8 @@ function render(d) {
   /* --- overview: connected link --- */
   setV($('o-ssid'), l.ssid || '未连接');
   setV($('o-freq'), l.freq ? (l.freq + ' MHz / ch ' + l.ch) : '—');
-  setV($('o-rssi'), l.rssi ? (l.rssi + ' dBm · ' + quality(l.rssi)) : '—',
-       l.rssi ? qcls(l.rssi) : '');
+  setV($('o-rssi'), l.rssi ? (l.rssi + ' dBm · ' + rssiBand(l.rssi).label) : '—',
+       l.rssi ? rssiBand(l.rssi).cls : '');
   setV($('o-link'), l.mbps ? (l.mbps + ' Mbps') : '—');
   setV($('o-std'), l.std ? ('Wi-Fi ' + l.std) : '—');
 
@@ -953,7 +518,7 @@ function render(d) {
   /* --- strongest neighbours --- */
   $('o-best').innerHTML = d.aps.slice(0, 5).map(a =>
     `<tr><td>${esc(a.ssid) || '(隐藏)'}</td><td>${a.ch}</td>
-     <td class="n ${qcls(a.rssi)}">${a.rssi}</td></tr>`).join('') || '<tr><td>—</td></tr>';
+     <td class="n ${rssiBand(a.rssi).cls}">${a.rssi}</td></tr>`).join('') || '<tr><td>—</td></tr>';
 
   /* --- channel page --- */
   const curSsid = d.link.ssid || '';
@@ -967,7 +532,7 @@ function render(d) {
                  '<span class="tag">' + esc(a.unii || '普通') + '</span>');
       return `<div class="ap-row"><span class="mac">${esc(a.bssid)}</span>
         <span class="num">${a.ch}</span><span class="num">${a.freq}</span>
-        <span class="num ${qcls(a.rssi)}">${a.rssi}</span>
+        <span class="num ${rssiBand(a.rssi).cls}">${a.rssi}</span>
         <span class="ty">${t}</span></div>`;
     }).join('');
     return `<div class="ap-group${on ? ' cur' : ''}">
@@ -996,22 +561,15 @@ function fmtLoad(v) {
   return (v / 1e6).toFixed(1) + 'M';
 }
 
-function qcls(r) {
-  if (r >= -50) return 'ok';
-  if (r >= -65) return 'warn';
-  return 'bad';
-}
 
 async function loadStatus() {
   const r = await run('sh ' + MGR + ' status');
-  if (r === null) return;
+  if (r === null) return false;
   const m = parseKV(r);
 
-  setV($('h-probed'), (m.probed || 0) + ' 条');
   setV($('h-user'), (m.user || 0) + ' 条');
   setV($('h-entries'), (m.entries || 0) + ' 条');
   setV($('h-mount'), m.mounted === '1' ? '已挂载' : '未挂载', m.mounted === '1' ? 'ok' : 'bad');
-  $('h-use').checked = m.use_probed !== '0';
   $('h-timeout').value = m.timeout || 3;
   $('h-threads').value = m.threads || 8;
 
@@ -1020,30 +578,30 @@ async function loadStatus() {
   setV($('c-want'), want);
   setV($('c-cur'), cur || '未获取', cur ? (cur === want ? 'ok' : 'warn') : 'bad');
   $('c-input').value = want;
+  return true;
 }
 
-async function loadManual() {
-  const r = await run('base64 -w0 ' + MODDIR + '/user-hosts 2>/dev/null');
-  if (!r) return;
-  const b = r.trim().split('\n').pop();
-  if (!b) return;
-  try { $('h-manual').value = decodeURIComponent(escape(atob(b))); } catch (e) { $('h-manual').value = ''; }
+/* The editor holds exactly what will be written to user-hosts - there is no
+   second layer to reconcile, so what the user sees is what gets mounted. */
+async function loadHosts() {
+  const r = await runQuiet('base64 -w0 ' + MODDIR + '/user-hosts 2>/dev/null');
+  const b = (r || '').trim().split('\n').pop();
+  if (!b) { $('h-manual').value = ''; return; }
+  try { $('h-manual').value = b64bytes(b); } catch (e) { $('h-manual').value = ''; }
 }
 
-/* refreshAll() re-reads state. It must not report anything itself: it is
-   called from busy()'s finally block, so any message here would overwrite the
-   result the action just reported ("探测完成：5/12" became "就绪"). */
+/* Full read: only used at startup and when an action explicitly asks for it.
+   It is deliberately NOT wired into busy()'s finally block any more - that
+   turned every button into a second, invisible full refresh. */
 async function refreshAll() {
-  await loadStatus();
-  const ok = await loadDiag(true);
+  const [, ok] = await Promise.all([loadStatus(), loadDiag()]);
   if (!ok && lastDiag) render(lastDiag);   /* keep the last good picture */
   return ok;
 }
 
 /* Set once the user has started anything. The startup sequence registers its
    own completion message, and without this guard that message would land on
-   top of a result the user had already triggered - the page would claim
-   "就绪" while a probe was still on screen. */
+   top of a result the user had already triggered. */
 let userActed = false;
 
 function busy(btn, fn) {
@@ -1055,141 +613,163 @@ function busy(btn, fn) {
     try {
       await fn();
     } catch (e) {
-      /* An exception used to leave the button re-enabled and nothing else -
-         indistinguishable from "nothing happened". */
       st('操作失败：' + (e && e.message ? e.message : e), { ok: false });
     } finally {
       btn.disabled = false;
       btn.textContent = label;
-      await refreshAll();
     }
   };
 }
 
 /* ---------- actions ---------- */
-/* A real scan takes a few seconds, so the button is disabled for the wait and
-   the result is re-measured afterwards rather than trusting the scan call. */
+/* Rescan: request it, then poll only the scan section until a fresher minimum
+   age appears. The old loop slept a full second and re-ran the whole
+   collection every round, so one round cost a second plus a full refresh. */
 $('btn-scan').onclick = busy($('btn-scan'), async () => {
   const before = lastDiag ? lastDiag.ageMin : null;
   st('正在请求扫描…', { running: true });
-  const r = await run('cmd wifi start-scan 2>&1');
-  st(r === null ? '系统不接受扫描请求，尝试直接刷新…' : '扫描已请求，等待结果…',
-     { running: true });
+  await runQuiet('cmd wifi start-scan');
 
-  /* Poll for genuinely fresh entries instead of sleeping a fixed 6s and then
-     claiming success. A stock scan lands in 1-4s, and "the cache still shows
-     the same age" is exactly what the user needs to see when it does not. */
-  let fresh = null;
-  for (let i = 1; i <= 12; i++) {
-    await new Promise(r2 => setTimeout(r2, 1000));
-    st('扫描中… ' + i + 's', { pct: Math.round(100 * i / 12) });
-    const d = await measure();
-    if (d.error) continue;
-    if (before === null || d.ageMin + 1 < before) { fresh = d; break; }
-    lastDiag = d;
+  const steps = [400, 600, 800, 1000, 1000, 1000, 1000, 1000, 1000];
+  let waited = 0;
+  for (const step of steps) {
+    await delay(step); waited += step;
+    st('扫描中… 已等 ' + (waited / 1000).toFixed(1) + 's',
+       { pct: Math.min(95, Math.round(100 * waited / 8000)) });
+    const rows = await measureScan();
+    if (!rows.length) continue;
+    if (before === null) break;
+    const ageMin = Math.min(...rows.map(r => r.age || 0));
+    if (ageMin + 1 < before) break;
   }
-  if (fresh) {
-    lastDiag = fresh;
-    render(fresh);
-    st('扫描完成：最新条目 ' + fresh.ageMin.toFixed(1) + ' 秒，共 ' +
-       fresh.summary.total + ' 个 AP', { ok: true });
+
+  const ok = await loadDiag();
+  if (!ok || !lastDiag) {
+    st('扫描后仍未取得数据，检查 Wi-Fi 是否连接', { ok: false });
     return;
   }
-  st('扫描没有回来新结果：缓存里最新的一条仍是 ' +
-     (before === null ? '未知' : before.toFixed(1) + ' 秒') +
-     '前。换个位置再试，或确认 Wi-Fi 已连接', { ok: false, warn: true });
+  const fresh = before === null || lastDiag.ageMin + 1 < before;
+  st(fresh ? '扫描完成：最新条目 ' + lastDiag.ageMin.toFixed(1) + ' 秒，共 ' +
+             lastDiag.summary.total + ' 个 AP'
+           : '扫描没有回来新结果：缓存里最新的一条仍是 ' +
+             (before === null ? '未知' : before.toFixed(1) + ' 秒') +
+             '前。换个位置再试，或确认 Wi-Fi 已连接',
+     fresh ? { ok: true } : { ok: false, warn: true });
 });
 
-$('h-use').onchange = async () => {
-  const v = $('h-use').checked ? 1 : 0;
-  await run('sed -i "s/^USE_PROBED=.*/USE_PROBED=' + v + '/" ' + MODDIR + '/config');
-  await loadStatus();
-};
-
-/* Probing contacts every (host, IP) pair with a TLS handshake, so it takes
-   real seconds. Report an estimate up front, then a live "N of M" ticker driven
-   by the number of hosts that have been resolved so far - the script writes
-   probed-hosts incrementally, so polling its progress is honest rather than
-   decorative. */
-async function runProbe(applyIt) {
-  const t = clamp(+$('h-timeout').value, 1, 20);
-  const n = clamp(+$('h-threads').value, 1, 32);
-  $('h-timeout').value = t; $('h-threads').value = n;
-
-  if (applyIt) {
-    await run('sed -i "s/^PROBE_TIMEOUT=.*/PROBE_TIMEOUT=' + t + '/;' +
-              's/^PROBE_THREADS=.*/PROBE_THREADS=' + n + '/" ' + MODDIR + '/config');
-  }
-
-  const pairs = await run('grep -cvE "^[[:space:]]*(#|$)" ' + MODDIR + '/domains');
-  const total = parseInt((pairs || '0').trim(), 10) || 0;
-  const waves = Math.max(1, Math.ceil(total / n));
-  const est = waves * t * 2;
-
-  st('探测中：' + total + ' 个域名，超时 ' + t + 's，' + n + ' 线程（最长约 ' + est + 's）',
-     { running: true });
-
-  const cmd = 'sh ' + MODDIR + '/probe.sh --print 2>&1';
-  const started = Date.now();
-  const ticker = setInterval(() => {
-    const el = Math.round((Date.now() - started) / 1000);
-    const pct = Math.min(95, Math.round(100 * el / Math.max(1, est)));
-    st('探测中：已用 ' + el + 's / 预计 ' + est + 's（' + total + ' 个域名 × 最多 ' +
-       n + ' 线程）', { pct: pct });
-  }, 1000);
-
-  const r = await run(cmd);
-  clearInterval(ticker);
-
-  if (r === null) { st('探测失败：无法执行命令', { ok: false }); return; }
-  const m = (s) => { const x = r.match(new RegExp('^' + s + '=(\\d+)$', 'm')); return x ? +x[1] : null; };
-  const tried = m('tried'), okCount = m('ok');
-  const took = Math.round((Date.now() - started) / 1000);
-
-  if (okCount === null) {
-    st('探测未返回结果，原始输出见下方', { ok: false });
-    out(r);
-    return;
-  }
-  const nohost = m('nohost') || 0;
-  if (okCount === 0 && (tried || 0) === 0) {
-    /* Zero candidates is not a network problem, and telling the user to raise
-       the timeout sends them down the wrong path - there was nothing to time
-       out. Every resolver failed to turn a name into an address. */
-    st('探测未开始：' + nohost + ' 个域名一个地址都没解析出来（' + took + 's）。' +
-       '这是 DNS 被拦或未联网，不是超时问题', { ok: false });
-  } else if (okCount === 0) {
-    st('探测完成：' + (tried || 0) + ' 个候选全部不可达（' + took + 's）。' +
-       '解析正常但连不上 443，可能是被墙或网络受限', { ok: false, warn: true });
-  } else {
-    st('探测完成：' + okCount + ' / ' + (tried || 0) + ' 个候选可用，耗时 ' + took + 's' +
-       (applyIt ? '，已应用' : ''), { ok: true });
-  }
-  out(r);
+/* Append detection results without touching anything the user already wrote.
+   A hostname already present keeps the user's value: the editor is the single
+   source of truth, so rewriting a line would be an invisible edit. */
+function appendDetected(text) {
+  const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return 0;
+  const cur = $('h-manual').value || '';
+  const have = new Set();
+  cur.split('\n').forEach(l => {
+    const p = l.trim().split(/\s+/);
+    if (p.length > 1 && !/^#/.test(p[0])) have.add(p[1].toLowerCase());
+  });
+  const add = [];
+  lines.forEach(l => {
+    const m = l.match(/^(\d+\.\d+\.\d+\.\d+)\t(\S+)$/);
+    if (!m) return;
+    const host = m[2].toLowerCase();
+    if (have.has(host)) return;
+    have.add(host);
+    add.push(m[1] + '\t' + m[2]);
+  });
+  if (!add.length) return 0;
+  $('h-manual').value = cur.replace(/\s+$/, '') + (cur.trim() ? '\n' : '') + add.join('\n');
+  return add.length;
 }
 
-$('h-probe').onclick = busy($('h-probe'), () => runProbe(true));
-$('h-onlyprobe').onclick = busy($('h-onlyprobe'), () => runProbe(false));
+/* Detection is read-only. probe.sh prints the winners, the page appends them to
+   the editor, and nothing touches the mounted file until 保存并应用. The log
+   pane is fed by reading probe.log while the command runs: a 20-second silent
+   button is indistinguishable from a hang. */
+async function runProbe() {
+  const t = clamp(+$('h-timeout').value, 1, 10);
+  const n = clamp(+$('h-threads').value, 1, 16);
+  $('h-timeout').value = t; $('h-threads').value = n;
 
+  await runQuiet('sed -i "s/^PROBE_TIMEOUT=.*/PROBE_TIMEOUT=' + t + '/;' +
+                 's/^PROBE_THREADS=.*/PROBE_THREADS=' + n + '/" ' + MODDIR + '/config');
+  await runQuiet('rm -f ' + MODDIR + '/probe.log');
+
+  const pane = $('h-log');
+  pane.hidden = false;
+  pane.textContent = '正在启动…';
+  $('h-state').textContent = '进行中';
+  st('检测中：正在解析域名…', { running: true });
+
+  /* Poll the log while the probe runs. One read at a time, bounded, and it
+     stops as soon as the script writes its `done` line. */
+  let done = false, polls = 0;
+  const watch = (async () => {
+    while (!done && polls++ < 90) {
+      const txt = (await runQuiet('cat ' + MODDIR + '/probe.log 2>/dev/null')).trim();
+      if (txt) {
+        pane.textContent = txt;
+        pane.scrollTop = pane.scrollHeight;
+        const last = txt.split('\n').pop();
+        st('检测中：' + last.replace(/^\[[^\]]*\]\s*/, ''), { running: true });
+        if (/\]\s*done\b/.test(last)) break;
+      }
+      await delay(800);
+    }
+  })();
+
+  const started = Date.now();
+  const r = await run('sh ' + MODDIR + '/probe.sh 2>&1');
+  done = true;
+  await watch;
+
+  const logTxt = (await runQuiet('cat ' + MODDIR + '/probe.log 2>/dev/null')).trim();
+  if (logTxt) { pane.textContent = logTxt; pane.scrollTop = pane.scrollHeight; }
+
+  if (r === null) {
+    $('h-state').textContent = '失败';
+    st('检测失败：无法执行命令', { ok: false });
+    return;
+  }
+
+  const lines = r.split('\n').map(l => l.trim())
+                 .filter(l => /^\d+\.\d+\.\d+\.\d+\t\S+$/.test(l));
+  const added = appendDetected(lines.join('\n'));
+  const skipped = lines.length - added;
+  const secs = ((Date.now() - started) / 1000).toFixed(0);
+  $('h-state').textContent = added ? '已追加 ' + added + ' 条' : '无新增';
+
+  if (!lines.length) {
+    st('检测结束（' + secs + 's）：没有可用地址，原因见上方日志', { ok: false, warn: true });
+  } else if (!added) {
+    st('检测结束（' + secs + 's）：' + lines.length + ' 个域名编辑框里已有，未覆盖', { ok: true });
+  } else {
+    st('检测结束（' + secs + 's）：' + added + ' 条已追加到编辑框' +
+       (skipped ? '，' + skipped + ' 条已存在未覆盖' : '') + '。确认后点「保存并应用」',
+       { ok: true });
+  }
+}
+
+$('h-probe').onclick = busy($('h-probe'), runProbe);
+
+/* The one button that changes state: write the editor verbatim, rebuild, mount. */
 $('h-save').onclick = busy($('h-save'), async () => {
   const text = $('h-manual').value || '';
-  const b64 = btoa(unescape(encodeURIComponent(text)));
   const lines = text.split('\n').filter(l => l.trim() && !/^\s*#/.test(l)).length;
-  st('保存 ' + lines + ' 条手动条目并重新挂载…', { running: true });
-  const r = await run(
-    'echo ' + b64 + ' | base64 -d > ' + MODDIR + '/user-hosts\n' +
-    'sh ' + MGR + ' apply 2>&1');
-  if (r === null) { st('保存失败：无法执行命令', { ok: false }); return; }
-  out(r);   /* only on failure does this override the status */
-  st('已保存 ' + lines + ' 条手动条目并应用', { ok: true });
-});
+  st('正在写入 ' + lines + ' 条并挂载…', { running: true });
 
-$('h-remount').onclick = busy($('h-remount'), async () => {
-  st('重新挂载 hosts…', { running: true });
-  const r = await run('sh ' + MGR + ' remount 2>&1');
-  if (r === null) { st('挂载失败：无法执行命令', { ok: false }); return; }
-  out(r);
-  st('已重新挂载 /system/etc/hosts', { ok: true });
+  const r = await run('printf %s ' + b64utf8(text) + ' | base64 -d > ' +
+                      MODDIR + '/user-hosts && sh ' + MGR + ' apply; echo "rc=$?"');
+  const rc = r === null ? null : (r.match(/^rc=(\d+)$/m) || [])[1];
+  if (rc !== '0') {
+    if (r !== null) out(r);
+    st('保存失败：' + (r === null ? '无法执行命令' : '写入或挂载出错，详情见「国家码」页'),
+       { ok: false });
+    return;
+  }
+  await loadStatus();
+  st('已保存 ' + lines + ' 条并重新挂载', { ok: true });
 });
 
 $('c-set').onclick = busy($('c-set'), async () => {
@@ -1199,6 +779,7 @@ $('c-set').onclick = busy($('c-set'), async () => {
   const r = await run('sh ' + MGR + ' set-cc ' + v + ' 2>&1');
   if (r === null) { st('设置失败：无法执行命令', { ok: false }); return; }
   out(r);
+  await loadStatus();
   st('国家码已设为 ' + v + '。注意：能否看到 DFS 信道取决于射频与固件', { ok: true });
 });
 
@@ -1207,14 +788,17 @@ $('c-auto').onclick = busy($('c-auto'), async () => {
   const r = await run('cmd wifi force-country-code disabled 2>&1; echo done');
   if (r === null) { st('失败：无法执行命令', { ok: false }); return; }
   out(r);
+  await loadStatus();
   st('已恢复为系统自动判断', { ok: true });
 });
 
 $('c-diag').onclick = busy($('c-diag'), async () => {
   st('运行四层诊断（framework / regdb / 驱动 / 射频）…', { running: true });
-  const r = await run('sh ' + MGR + ' diagnose 2>&1 | head -60');
+  /* No `| head -60`: closing the pipe kills diagnose.sh with SIGPIPE and
+     truncates diagnose.log at the same line. Trim for display instead. */
+  const r = await run('sh ' + MGR + ' diagnose 2>&1');
   if (r === null) { st('诊断失败：无法执行命令', { ok: false }); return; }
-  out(r);
+  out(r.length > 6000 ? r.slice(0, 6000) + '\n…（完整输出见 diagnose.log）' : r);
   st('诊断完成，完整输出见下方（含 diagnose.log）', { ok: true });
 });
 
@@ -1237,16 +821,15 @@ function paintCap(kv) {
       txt += '（' + kv.survey_channels + ' 个信道）';
     if (key === 'monitor' && v === 'yes' && kv.monitor_creatable === 'no')
       { txt = '声明支持，但建不出接口'; cls = 'bad'; }
-    if (key === 'noise' && v && v !== 'none') txt += ' dBm';
     setV($(id), txt, cls);
   };
   set('cap-survey', 'survey', 'yes');
   set('cap-mon', 'monitor', 'yes');
   set('cap-inj', 'injection', 'yes');
-  set('cap-drv', 'driver', '@none');
-  $('cap-drv').textContent = (kv.soc && kv.soc !== 'unknown' ? kv.soc + ' · ' : '') +
-                             (kv.driver || '未知');
-  $('cap-drv').className = 'v';
+  /* Driver is a string, not a yes/no: render it directly instead of calling
+     set() with a sentinel and then overwriting the result two lines later. */
+  setV($('cap-drv'), (kv.soc && kv.soc !== 'unknown' ? kv.soc + ' · ' : '') +
+                     (kv.driver || '未知'), '');
   setV($('cap-ext'), kv.external_adapter === 'yes' ? '已连接' : '无',
        kv.external_adapter === 'yes' ? 'ok' : '');
 }
@@ -1255,11 +838,7 @@ $('btn-cap').onclick = busy($('btn-cap'), async () => {
   st('正在检测射频能力…', { running: true });
   const r = await run('sh ' + MGR + ' capacity --json 2>&1');
   if (r === null) { st('检测失败：无法执行命令', { ok: false }); return; }
-  const kv = {};
-  r.split('\n').forEach(l => {
-    const i = l.indexOf('=');
-    if (i > 0) kv[l.slice(0, i).trim()] = l.slice(i + 1).trim();
-  });
+  const kv = parseKV(r);
   paintCap(kv);
   out(r);
   /* The values are the strings 'yes'/'no'/'unknown', and 'no' is truthy - the
@@ -1284,11 +863,11 @@ function clamp(v, a, b) { return isNaN(v) ? a : Math.max(a, Math.min(b, v)); }
   }
   await resolveModDir();
   st('正在读取设备状态…', { running: true });
+  await loadHosts();                       /* the editor first: it is local */
   const ok = await refreshAll();
   if (userActed) return;                   /* a real action owns the status bar */
   if (ok) st('就绪 · ' + MODDIR, { ok: true });
   else    st('未取得扫描数据，点「重新扫描」或检查网络', { warn: true });
-  await loadManual();
 })();
 </script>
 </body>

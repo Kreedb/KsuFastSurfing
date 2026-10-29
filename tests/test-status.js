@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-/* Tests for the WebUI status bar.
+/* Tests for the WebUI's action flow and status feedback.
  *
- * The bug this guards against: every button reported into a <pre> that only
- * existed inside the country-code tab, so pressing "探测并应用" on the hosts
- * tab produced no visible feedback at all. Then, after the global bar was
- * added, refreshAll() overwrote the result from busy()'s finally block
- * ("探测完成：5/12" turned into "就绪").
+ * The rules this guards:
+ *   - a button reports where the user can see it, from any tab;
+ *   - detection is read-only: results go to the editor, never to a file;
+ *   - one button applies, and nothing else changes mounted state;
+ *   - a finished action must not trigger a second, invisible full refresh;
+ *   - a rescan that returns the same cache says so instead of claiming success.
  *
  * Run: node tests/test-status.js
  */
@@ -15,6 +16,7 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'module/webroot/index.html'), 'utf8');
 const js = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const diagSrc = fs.readFileSync(path.join(ROOT, 'module/webroot/diag.js'), 'utf8');
 
 /* Minimal DOM: just enough that the page's own code can run unmodified. */
 function el(id) {
@@ -29,66 +31,63 @@ const els = {};
 global.document = { getElementById: id => els[id] || (els[id] = el(id)) };
 global.btoa = s => Buffer.from(s, 'binary').toString('base64');
 global.atob = b => Buffer.from(b, 'base64').toString('binary');
-global.unescape = s => decodeURIComponent(s.replace(/%([0-9A-F]{2})/g, (m, p) => '%' + p));
-global.escape = s => s;
 global.window = global;
-/* The probe ticker uses setInterval; tests are synchronous, so disable it. */
-global.setInterval = () => 0;
-global.clearInterval = () => {};
 
-/* The framework redacts the middle two octets on Android 12+, so this is the
-   shape the page actually receives. The real address is in WPA below. */
+/* Every command the page issues, so tests can assert on the transport itself. */
+const seen = [];
+const capState = { json: 'survey=no\nmonitor=no\ninjection=no\n' };
+const capOut = () => capState.json;
+
 const SCAN_MASKED = 'BSSID  Frequency  RSSI  Age(sec)  SSID  Flags\n' +
   '  aa:bb:**:**:ee:01  5180  -51(0:-51/1:-56)  7.5  Home  [RSN-PSK][ESS]\n';
-
-/* Mutable so the "rescan" test can hand back a fresher cache. */
 let scanOut = () => SCAN_MASKED;
 
-/* wpa_supplicant's table: the real BSSID for the same radio. The framework
-   hands the page a redacted address, and this is where the true one comes from. */
 const WPA = 'bssid / frequency / signal level / flags / ssid\n' +
   'aa:bb:cc:dd:ee:01\t5180\t-51\t[RSN-PSK-CCMP][ESS]\tHome\n';
 
-/* The page reads scan/status through `| base64` so multibyte SSIDs survive.
-   The stub has to answer in the same shape, or every test sees an empty scan. */
 const b64 = s => Buffer.from(s, 'utf8').toString('base64') + '\n';
 const STATUS = 'WifiInfo: SSID: "Home", RSSI: -51, Link speed: 573Mbps, ' +
                'Frequency: 5180MHz, Wi-Fi standard: 11ax\n';
-const MGR_STATUS = 'probed=5\nuser=1\nentries=6\nmounted=1\ncc=US\ncur_cc=US\n' +
-                   'use_probed=1\ntimeout=3\nthreads=8';
+const MGR_STATUS = 'user=1\nentries=7\nmounted=1\ncc=US\ncur_cc=US\ntimeout=3\nthreads=8';
 
-let probeOut = 'pairs=12\ntimeout=3\nthreads=8\ntried=12\nok=5\n';
-/* Every command the page issues, so tests can assert on the transport itself
-   and not only on the parsed result. */
-const seen = [];
-/* Swapped per case by the capability tests. Held in an object because the mock
-   closes over the binding, and reassigning a `let` it already captured would
-   silently keep answering the old value. */
-const capState = { json: 'survey=no\nmonitor=no\ninjection=no\n' };
-const capOut = () => capState.json;
+/* What collect.sh prints. One command, every block. */
+const collect = (scan) => '##scan\n' + scan +
+  '##link\n' + STATUS +
+  '##route\ndefault via 192.168.1.1 dev wlan0 proto static\n' +
+  '##ping\n3 packets transmitted, 3 received, 0% packet loss\n' +
+  'rtt min/avg/max/mdev = 1.0/2.4/3.0/0.5 ms\n' +
+  '##dns\nrc=0\n' +
+  '##mac\n' + WPA;
+
+let userHosts = '1.1.1.1\tmtalk.google.com\n';
+let probeOut = '';
+let logOut = '';
+let applied = [];
 
 global.ksu = {
   moduleInfo: () => JSON.stringify({ moduleDir: '/m' }),
   exec(cmd, opt, cb) {
-    let out = 'ok\n';
+    let out = '';
     seen.push(cmd);
-    /* Commands the page wraps in `| base64` must answer encoded. */
-    if (cmd.includes('list-scan-results')) out = b64(scanOut());
-    else if (cmd.includes('base64')) out = b64('');
-    else if (cmd.includes('scan_results')) out = b64(WPA);
-    else if (cmd.includes('cmd wifi status')) out = b64(STATUS);
-    else if (cmd.includes('ip route')) out = 'default via 192.168.1.1 dev wlan0\n';
-    else if (cmd.includes('ping -c 5'))
-      out = '5 packets transmitted, 5 packets received, 0% packet loss\n' +
-            'rtt min/avg/max/mdev = 1.2/2.4/3.6/0.8 ms\n';
-    else if (cmd.includes('ping -c 1')) out = '0\n';
-    else if (cmd.includes('manager.sh status')) out = MGR_STATUS;
-    else if (cmd.includes('grep -cvE')) out = '12\n';
-    else if (cmd.includes('probe.sh')) out = probeOut;
-    else if (/manager\.sh capacity|capacity\.sh/.test(cmd)) out = capOut();
+    if (/probe\.log/.test(cmd)) out = logOut;
+    else if (/probe\.sh/.test(cmd)) out = probeOut;
+    else if (/collect\.sh scan/.test(cmd)) out = b64(scanOut());
+    else if (/collect\.sh/.test(cmd)) out = b64(collect(scanOut()));
+    else if (/manager\.sh status/.test(cmd)) out = MGR_STATUS;
+    else if (/base64 -w0 .*user-hosts|user-hosts 2>/.test(cmd)) out = b64(userHosts);
+    else if (/printf %s/.test(cmd)) { applied.push(cmd); out = 'rc=0\n'; }
+    else if (/manager\.sh apply/.test(cmd)) out = '';
+    else if (/capacity/.test(cmd)) out = capOut();
+    else if (/manager\.sh diagnose/.test(cmd)) out = 'diag output\n';
+    else if (/manager\.sh set-cc|force-country-code/.test(cmd)) out = 'cc=US\n';
     setTimeout(() => global.window[cb](0, out, ''), 0);
   }
 };
+
+/* Keep the poller's 800 ms tick from slowing the suite down. The bridge stub
+   already answers on a 0 ms timer, so ordering is preserved. */
+const realSetTimeout = global.setTimeout;
+global.setTimeout = (fn) => realSetTimeout(fn, 0);
 
 let failures = 0;
 function eq(label, got, want) {
@@ -98,25 +97,37 @@ function eq(label, got, want) {
 function ok(label, cond, detail) {
   if (!cond) { console.log(`  FAIL ${label}${detail ? '\n    ' + detail : ''}`); failures++; }
 }
+async function until(fn, ms = 3000) {
+  const t0 = Date.now();
+  while (!fn()) {
+    if (Date.now() - t0 > ms) throw new Error('condition not reached');
+    await new Promise(r => realSetTimeout(r, 5));
+  }
+}
 
 process.on('unhandledRejection', e => {
-  console.log('  FAIL unhandled rejection:', e.message);
+  console.log('  FAIL unhandled rejection:', e.stack || e.message);
   failures++;
 });
 
-eval(js);
+/* diag.js and the page share one script scope in the packaged file, so they
+   are evaluated together here too. */
+eval(diagSrc + '\n' + js);
 
-const g = id => els[id];
+const g = id => els[id] || (els[id] = el(id));
 
-setTimeout(async () => {
+(async () => {
+  await until(() => /就绪|未取得/.test(g('status-text').textContent));
+
   console.log('== startup ==');
   ok('status bar visible after init', !g('status').hidden);
   eq('init reports ready', g('status-text').textContent, '就绪 · /m');
+  eq('editor is the saved file', g('h-manual').value, '1.1.1.1\tmtalk.google.com\n');
+  ok('one collection, not one per source',
+     seen.filter(c => /collect\.sh/.test(c)).length === 1,
+     seen.filter(c => /collect\.sh/.test(c)).length + ' collect calls');
 
-  console.log('== visible from another tab ==');
-  /* The original bug: the detail pane lived inside #p-cc, so a button on the
-     hosts tab wrote where nothing could be seen. The bar must be outside every
-     .page container. */
+  console.log('== status bar sits outside the tab sections ==');
   g('tab-hs').onclick();
   ok('bar visible after switching tabs', !g('status').hidden);
   const pageStart = html.indexOf('id="p-hs"');
@@ -124,55 +135,62 @@ setTimeout(async () => {
   ok('status bar sits outside the tab sections', barPos < pageStart,
      `bar at ${barPos}, first tab at ${pageStart}`);
 
-  console.log('== probe reports a result, not raw stdout ==');
-  g('h-timeout').value = '3'; g('h-threads').value = '8';
-  await g('h-onlyprobe').onclick();
-  ok('probe result survives refreshAll',
-     /探测完成：5 \/ 12/.test(g('status-text').textContent),
+  console.log('== detection appends, never writes ==');
+  probeOut = '140.82.113.4\tgithub.com\n142.250.72.14\tmtalk.google.com\n';
+  logOut = '[12:00:01] start domains=2 timeout=3s threads=8\n' +
+           '[12:00:02] resolve github.com -> 1 ip\n' +
+           '[12:00:05] ok   github.com 140.82.113.4 0.032s tls=1\n' +
+           '[12:00:06] done hosts=2 candidates=3 seconds=5\n';
+  const beforeProbe = seen.length;
+  await g('h-probe').onclick();
+
+  ok('probe result appended', g('h-manual').value.includes('140.82.113.4\tgithub.com'),
+     g('h-manual').value);
+  ok('existing entry kept', g('h-manual').value.includes('1.1.1.1\tmtalk.google.com'),
+     g('h-manual').value);
+  ok('existing entry not duplicated', g('h-manual').value.split('mtalk.google.com').length === 2,
+     g('h-manual').value);
+  ok('log pane is visible', !g('h-log').hidden);
+  ok('log shows progress', /ok\s+github\.com/.test(g('h-log').textContent),
+     g('h-log').textContent);
+  ok('status names what was added', /1 条已追加到编辑框/.test(g('status-text').textContent),
      g('status-text').textContent);
-  eq('probe result is ok-coloured', g('status').className, 'status ok');
-  /* The raw script output belongs in the detail pane, not the status bar. */
-  ok('status is not the raw pairs= line', !/^pairs=/.test(g('status-text').textContent),
+  ok('status mentions the skipped entry', /1 条已存在未覆盖/.test(g('status-text').textContent),
+     g('status-text').textContent);
+  ok('detection did not touch hosts',
+     !applied.some(c => /manager\.sh apply/.test(c)), applied.join(' | '));
+  ok('detection does not re-read the scan',
+     !seen.slice(beforeProbe).some(c => /collect\.sh/.test(c)),
+     seen.slice(beforeProbe).filter(c => /collect\.sh/.test(c)).join(' | '));
+
+  console.log('== detection with nothing reachable ==');
+  const keep = g('h-manual').value;
+  probeOut = '';
+  logOut = '[12:00:01] start domains=2 timeout=3s threads=8\n' +
+           '[12:00:02] resolve github.com -> none\n' +
+           '[12:00:02] done hosts=0 candidates=0\n';
+  await g('h-probe').onclick();
+  ok('failure is reported', /没有可用地址/.test(g('status-text').textContent),
+     g('status-text').textContent);
+  ok('failure is not green', /warn|bad/.test(g('status').className), g('status').className);
+  eq('editor unchanged on failure', g('h-manual').value, keep);
+
+  console.log('== one button applies ==');
+  g('h-manual').value = '9.9.9.9\tgithub.com\n';
+  await g('h-save').onclick();
+  const cmd = applied[applied.length - 1] || '';
+  const enc = (cmd.match(/printf %s (\S+) \|/) || [])[1] || '';
+  eq('editor is what gets written', Buffer.from(enc, 'base64').toString('utf8'),
+     '9.9.9.9\tgithub.com\n');
+  ok('apply runs after the write', /manager\.sh apply/.test(cmd), cmd);
+  ok('save reports success', /已保存 1 条/.test(g('status-text').textContent),
      g('status-text').textContent);
 
-  console.log('== probe with nothing reachable ==');
-  probeOut = 'pairs=12\ntimeout=3\nthreads=8\ntried=12\nok=0\n';
-  await g('h-onlyprobe').onclick();
-  ok('total failure is reported as a failure',
-     /12 个候选全部不可达/.test(g('status-text').textContent), g('status-text').textContent);
-  ok('total failure is red or warn-coloured',
-     /bad|warn/.test(g('status').className), g('status').className);
-
-  /* Zero candidates is a different failure: nothing was even resolved, so
-     "raise the timeout" is the wrong advice and chasing it wastes the user's
-     time. This is the case that was reported as "0 个候选全部不可达". */
-  probeOut = 'pairs=0\nnohost=12\ntimeout=3\nthreads=8\ntried=0\nok=0\n';
-  await g('h-onlyprobe').onclick();
-  ok('no candidates names the resolver',
-     /一个地址都没解析出来/.test(g('status-text').textContent),
-     g('status-text').textContent);
-  ok('no candidates does not blame the timeout',
-     !/加大超时/.test(g('status-text').textContent), g('status-text').textContent);
-  ok('no candidates is red', /bad/.test(g('status').className), g('status').className);
-
-  console.log('== other actions ==');
-  g('c-input').value = 'JP';
-  await g('c-set').onclick();
-  ok('country code result', /国家码已设为 JP/.test(g('status-text').textContent),
-     g('status-text').textContent);
-
-  await g('h-remount').onclick();
-  ok('remount result', /已重新挂载/.test(g('status-text').textContent),
-     g('status-text').textContent);
-
-  /* A rescan that returns the same cache must say so. Reporting "扫描完成" after
-     a fixed sleep was the bug: the freshness row never moved and the button
-     looked like it did nothing. */
+  console.log('== rescan tells the truth ==');
   await g('btn-scan').onclick();
   ok('stale rescan is reported as stale', /没有回来新结果/.test(g('status-text').textContent),
      g('status-text').textContent);
 
-  /* ...and a rescan that really lands fresh entries reports success. */
   scanOut = () => 'BSSID  Frequency  RSSI  Age(sec)  SSID  Flags\n' +
     '  aa:bb:**:**:ee:01  5180  -51(0:-51/1:-56)  0.4  Home  [RSN-PSK][ESS]\n';
   await g('btn-scan').onclick();
@@ -180,19 +198,13 @@ setTimeout(async () => {
      g('status-text').textContent);
 
   console.log('== multibyte ssid survives the bridge ==');
-  /* The bridge decodes as Latin-1, so a Chinese SSID used to reach the page as
-     its first character plus mojibake. The page must ask for base64 and decode
-     once; a plain `cmd wifi ...` read cannot represent these bytes. */
   ok('scan is read through base64',
-     seen.some(c => /list-scan-results/.test(c) && /base64/.test(c)),
-     seen.filter(c => /list-scan-results/.test(c)).join(' | '));
-  ok('status is read through base64',
-     seen.some(c => /cmd wifi status/.test(c) && /base64/.test(c)),
-     seen.filter(c => /cmd wifi status/.test(c)).join(' | '));
+     seen.some(c => /collect\.sh/.test(c) && /base64/.test(c)),
+     seen.filter(c => /collect\.sh/.test(c)).join(' | '));
 
   scanOut = () => 'BSSID  Frequency  RSSI  Age(sec)  SSID  Flags\n' +
-    '  68:19:**:**:37:c3  5785  -58(0:-59/1:-63)  11.1  华科  [RSN-PSK][ESS]\n' +
-    '  68:19:**:**:37:c2  5785  -58(0:-59/1:-63)  11.1  咖啡馆 5G  [RSN-PSK][ESS]\n';
+    '  68:19:**:**:37:c3  5785  -58(0:-59/1:-63)  10.1  华科  [RSN-PSK][ESS]\n' +
+    '  68:19:**:**:37:c2  5785  -58(0:-59/1:-63)  10.1  咖啡馆 5G  [RSN-PSK][ESS]\n';
   await g('btn-scan').onclick();
   const apHtml = g('ap-groups').innerHTML;
   ok('chinese ssid renders intact', apHtml.includes('华科'), apHtml.slice(0, 200));
@@ -200,11 +212,8 @@ setTimeout(async () => {
   ok('no replacement glyphs', !/\ufffd/.test(apHtml), apHtml.slice(0, 200));
 
   console.log('== hardware capability ==');
-  /* The whole point is to let the device answer instead of guessing from the
-     model, so the render must not soften a "no" into something that reads like
-     a yes, and the two monitor-mode states must stay distinguishable. */
-  capState.json = 'soc=SM8650\nhardware=qcom\ndriver=qcacld\ninterfaces=wlan0\n' +
-    'phys=1\nsurvey=no\nnoise=none\nmonitor=no\ninjection=no\nexternal_adapter=no\n';
+  capState.json = 'soc=SM8650\nhardware=qcom\ndriver=qcacld\n' +
+    'survey=no\nnoise=none\nmonitor=no\ninjection=no\nexternal_adapter=no\n';
   await g('btn-cap').onclick();
   eq('survey shown as unsupported', g('cap-survey').textContent, '不支持');
   eq('monitor shown as unsupported', g('cap-mon').textContent, '不支持');
@@ -214,17 +223,12 @@ setTimeout(async () => {
   ok('nothing supported is reported honestly',
      /无法给出噪声\/频谱/.test(g('status-text').textContent), g('status-text').textContent);
 
-  /* Survey supported: the channel count is what makes it actionable, so a bare
-     "支持" is not enough. */
   capState.json = 'soc=SM8650\ndriver=qcacld\nsurvey=yes\nsurvey_channels=38\n' +
     'monitor=no\ninjection=no\nexternal_adapter=no\n';
   await g('btn-cap').onclick();
   eq('survey carries the channel count', g('cap-survey').textContent, '支持（38 个信道）');
   eq('survey is green when supported', g('cap-survey').className, 'v ok');
 
-  /* The driver claims monitor mode but the interface cannot be created. That
-     must read as a failure, not as support: it is the exact situation where a
-     feature looks buildable and then cannot run. */
   capState.json = 'soc=SM8650\ndriver=bcmdhd\nsurvey=unknown\nmonitor=yes\n' +
     'monitor_creatable=no\ninjection=no\nexternal_adapter=yes\n';
   await g('btn-cap').onclick();
@@ -234,13 +238,6 @@ setTimeout(async () => {
   eq('external adapter detected', g('cap-ext').textContent, '已连接');
   eq('survey unknown is not a yes', g('cap-survey').textContent, '未确认');
 
-  /* Only when injection is actually reachable does the summary offer it. */
-  capState.json = 'soc=SM8650\ndriver=bcmdhd\nsurvey=yes\nmonitor=yes\ninjection=yes\n' +
-    'external_adapter=no\n';
-  await g('btn-cap').onclick();
-  ok('summary lists what is usable', /可用 .*注入/.test(g('status-text').textContent),
-     g('status-text').textContent);
-
   console.log('== failure is visible, not silent ==');
   g('c-input').value = 'X';
   await g('c-set').onclick();
@@ -249,4 +246,4 @@ setTimeout(async () => {
 
   console.log(failures ? `\n${failures} failure(s)` : '\nall status-bar tests passed');
   process.exit(failures ? 1 : 0);
-}, 800);
+})();

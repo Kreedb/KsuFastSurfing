@@ -47,31 +47,12 @@ async function shText(cmd) {
 }
 
 /* ---------- MAC recovery ----------
-   Android 12+ redacts the middle two octets of every BSSID in results returned
-   through the framework (`68:19:**:**:37:c3`) unless the caller holds location
-   access with the location toggle on. That is why the AP list showed asterisks
-   and why two radios under one SSID could not be told apart.
-
-   wpa_supplicant keeps the same scan results with the real addresses, and the
-   page runs as root, so its control interface is reachable. Its output is
-   tab-separated: bssid / frequency / signal / flags / ssid. When the ROM has no
-   wpa_cli the framework value is kept - never invented. */
-const MAC_CMDS = [
-  /* A cached scan is enough; if the supplicant has none, ask it to scan and
-     read again. Both are quiet on failure so the next command runs. */
-  'wpa_cli -i wlan0 scan_results',
-  'wpa_cli -i wlan0 scan_results 2>/dev/null | grep -q "^[0-9a-f]" || ' +
-    '{ wpa_cli -i wlan0 scan >/dev/null 2>&1; sleep 2; }; ' +
-    'wpa_cli -i wlan0 scan_results',
-  'for d in /data/vendor/wifi/wpa/sockets /data/misc/wifi/sockets ' +
-    '/data/vendor/wifi/sockets /data/vendor/wifi/hostapd/sockets; do ' +
-    'wpa_cli -p "$d" -i wlan0 scan_results 2>/dev/null && break; done',
-  'for d in /data/vendor/wifi/wpa/sockets /data/misc/wifi/sockets ' +
-    '/data/vendor/wifi/sockets; do ' +
-    'wpa_cli -p "$d" -i wlan0 scan >/dev/null 2>&1; sleep 2; ' +
-    'wpa_cli -p "$d" -i wlan0 scan_results 2>/dev/null && break; done'
-];
-
+   Android 12+ redacts the middle two octets of every BSSID returned through the
+   framework (`68:19:**:**:37:c3`) unless the caller holds location access. The
+   supplicant keeps the real addresses, and collect.sh reads them - but only
+   when a redaction is actually present, and with a 1.4 s bounded backoff
+   instead of the two fixed 2 s sleeps this page used to pay on every refresh.
+   Its table is tab-separated: bssid / frequency / signal / flags / ssid. */
 function parseWpa(txt) {
   const out = [];
   (txt || '').split('\n').forEach(line => {
@@ -84,15 +65,6 @@ function parseWpa(txt) {
     out.push({ bssid, freq, rssi, ssid });
   });
   return out;
-}
-
-async function readRealMacs() {
-  for (const c of MAC_CMDS) {
-    const txt = await shText(c);
-    const rows = parseWpa(txt);
-    if (rows.length) return rows;
-  }
-  return [];
 }
 
 /* Fill a masked BSSID (and a truncated or garbled name) from the supplicant
@@ -148,7 +120,6 @@ function fillMacs(rows, real) {
        up as its first character plus a replacement glyph. The supplicant prints
        the raw bytes, so prefer its copy whenever the two disagree. */
     if (r.ssid && r.ssid !== a.ssid) a.ssid = r.ssid;
-    a.macSource = 'supplicant';
   });
   return fixed;
 }
@@ -236,28 +207,41 @@ function parseLink(txt) {
   return { ssid, freq, ch: freq ? chanOf(freq) : 0, rssi, mbps, std };
 }
 
+/* ---------- sectioned collection ----------
+   collect.sh prints `##name` before each block. Splitting on that marker keeps
+   the per-command boundaries without a delimiter protocol for the payload:
+   SSIDs may contain '##', newlines are impossible, and each block is handed to
+   the parser that understands it. */
+function sections(txt) {
+  const map = {};
+  let cur = '';
+  (txt || '').split('\n').forEach(line => {
+    const m = line.match(/^##([a-z]+)\s*$/);
+    if (m) { cur = m[1]; map[cur] = []; return; }
+    if (cur) map[cur].push(line);
+  });
+  const out = {};
+  for (const k in map) out[k] = map[k].join('\n').trim();
+  return out;
+}
+
 /* ---------- gateway / L3 ---------- */
-async function collectNet() {
+/* Pure: takes the already-collected route/ping/dns blocks, so a failed ping
+   cannot blank the gateway and a missing gateway cannot look like 0% loss. */
+function parseNet(route, pingTxt, dnsTxt) {
   const net = { gateway: '', loss: null, rtt: null, dns: 'unknown' };
 
-  /* No awk here either: parsing 'default via X dev Y' is two tokens, and the
-     page is where parsing belongs now. */
-  const r = await sh('ip route 2>/dev/null');
-  const def = ((r.out || '').split('\n').find(l => /^default/.test(l)) || '').trim();
+  const def = ((route || '').split('\n').find(l => /^default/.test(l)) || '').trim();
   const via = def.match(/^default\s+via\s+(\S+)/);
   net.gateway = via ? via[1] : '';
 
-  if (net.gateway) {
-    const p = await sh('ping -c 5 -i 0.2 -W 1 ' + net.gateway + ' 2>/dev/null');
-    const pl = (p.out || '').match(/(\d+)% packet loss/);
-    if (pl) net.loss = +pl[1];
-    const rt = (p.out || '').match(/rtt [^=]*= ([\d.]+)\/([\d.]+)/);
-    if (rt) net.rtt = +rt[2];                       /* avg, not max */
-  }
+  const pl = (pingTxt || '').match(/(\d+)% packet loss/);
+  if (pl) net.loss = +pl[1];
+  const rt = (pingTxt || '').match(/rtt [^=]*= ([\d.]+)\/([\d.]+)/);
+  if (rt) net.rtt = +rt[2];                         /* avg, not max */
 
-  /* One lookup tests DNS and reachability together. */
-  const d = await sh('ping -c 1 -W 2 github.com >/dev/null 2>&1; echo $?');
-  net.dns = ((d.out || '').trim().split('\n').pop() === '0') ? 'ok' : 'fail';
+  const rc = ((dnsTxt || '').match(/^rc=(\d+)$/m) || [])[1];
+  net.dns = rc === '0' ? 'ok' : (rc ? 'fail' : 'unknown');
   return net;
 }
 
@@ -319,11 +303,15 @@ function scoreChannels(rows) {
   return out;
 }
 
-function quality(r) {
-  if (r >= -50) return 'excellent';
-  if (r >= -60) return 'good';
-  if (r >= -70) return 'fair';
-  return 'weak';
+/* One scale for both the label and the colour. There used to be two: a
+   quality() returning English words at -50/-60/-70, and a qcls() mapping to CSS
+   classes at -50/-65. The same reading could be "good" and "warn" at once, and
+   the English word sat in the middle of a Chinese row. */
+function rssiBand(r) {
+  if (r >= -50) return { label: '很强', cls: 'ok' };
+  if (r >= -60) return { label: '良好', cls: 'ok' };
+  if (r >= -70) return { label: '一般', cls: 'warn' };
+  return { label: '弱', cls: 'bad' };
 }
 
 /* ---------- assemble the whole picture ---------- */
@@ -364,15 +352,6 @@ function analyse(rows, link, net) {
     };
   }).sort((a, b) => b.best - a.best || (a.ssid < b.ssid ? -1 : 1));
 
-  const best = aps[0] || {};
-
-  /* Congestion counts raw BSSIDs, not SSIDs: one SSID on five radios still
-     occupies the channel five times. */
-  const cong = {};
-  rows.forEach(a => { cong[a.ch] = (cong[a.ch] || 0) + 1; });
-  const congestion = Object.keys(cong).map(c => ({ ch: +c, count: cong[c] }))
-    .sort((a, b) => b.count - a.count || a.ch - b.ch);
-
   /* Multi-BSSID SSIDs mean mesh / roaming, which changes the advice. */
   const bssPerSsid = {};
   rows.forEach(a => {
@@ -386,7 +365,6 @@ function analyse(rows, link, net) {
   const n5 = count(a => a.band === '5');
 
   const dfsVerdict = (n5 > 0 && dfsCh.length > 0) ? 'ok' : (n5 > 0 ? 'none' : 'nodata');
-  const netVerdict = net.loss === null ? 'nogw' : (net.loss === 0 ? 'ok' : 'lossy');
 
   return {
     /* The link/L3 numbers are carried at the top level because the renderer
@@ -395,27 +373,21 @@ function analyse(rows, link, net) {
     gateway: net.gateway, loss: net.loss, rtt: net.rtt,
     summary: {
       total: n,
-      n24: count(a => a.band === '2.4'), n5, n6: count(a => a.band === '6'),
+      n24: count(a => a.band === '2.4'), n5,
       ndfs: count(a => a.dfs),
       nunii2a: count(a => a.unii === 'UNII-2A'),
       nunii2c: count(a => a.unii === 'UNII-2C'),
-      nunii3: count(a => a.unii === 'UNII-3'),
-      nwpa3: count(a => a.wpa3), nopen: count(a => a.open)
+      nunii3: count(a => a.unii === 'UNII-3')
     },
-    best: { rssi: best.rssi || 0, ssid: best.ssid || '', freq: best.freq || 0 },
     link: link || { ssid: '', freq: 0, ch: 0, rssi: 0, mbps: 0, std: '' },
-    /* Freshness, three ways. The old value was the maximum age over all APs,
-       which is dominated by whichever neighbour the radio stopped hearing five
-       minutes ago - it barely moves after a rescan, so "did my scan do
-       anything" was unanswerable. The median describes the cache as a whole and
-       the minimum proves a scan actually landed. */
-    ageMax: ages[ages.length - 1] || 0,
+    /* Two ages: the median describes the cache as a whole, the minimum proves a
+       scan actually landed. The maximum was removed - it is set by whichever
+       neighbour the radio stopped hearing five minutes ago and never moves. */
     ageMin: ages[0] || 0,
     ageMed: ages.length ? ages[Math.floor(ages.length / 2)] : 0,
-    dfsCh, aps, groups, congestion, roam, scores,
+    dfsCh, aps, groups, roam, scores,
     verdict: {
-      dfs: dfsVerdict, net: netVerdict,
-      dns: net.dns, best_ch: scores.length ? scores[0].ch : null
+      dfs: dfsVerdict, dns: net.dns, best_ch: scores.length ? scores[0].ch : null
     }
   };
 }
@@ -423,22 +395,24 @@ function analyse(rows, link, net) {
 /* Collect everything. Each source independent so one failure is reported
    rather than blanking the page. */
 async function measure() {
-  /* Base64 in transit: see shText(). `cmd wifi` output is UTF-8 by contract,
-     but every hop in the WebUI bridge decodes as Latin-1, so a Chinese SSID
-     arrived as garbage. */
-  const scan = await shText('cmd wifi list-scan-results');
-  const link = await shText('cmd wifi status');
-  const net = await collectNet();
+  /* One exec for the whole picture. `shText` keeps the bytes intact: the bridge
+     decodes as Latin-1, so a Chinese SSID would otherwise arrive as mojibake. */
+  const raw = await shText('sh ' + MODDIR + '/collect.sh');
+  const s = sections(raw);
 
-  const rows = parseScan(scan);
-  if (!rows.length) {
-    return { error: 'empty-scan', raw: scan, err: '' };
-  }
-  const macs = await readRealMacs();
-  const fixed = fillMacs(rows, macs);
+  const rows = parseScan(s.scan || '');
+  if (!rows.length) return { error: 'empty-scan', raw: s.scan || '' };
 
-  const d = analyse(rows, parseLink(link), net);
-  d.macFixed = fixed;
-  d.macTotal = rows.filter(a => /\*/.test(a.bssid)).length;
-  return d;
+  /* collect.sh already decided whether a supplicant lookup was worth doing
+     (only when a BSSID is redacted) and bounded the wait. An empty section is
+     the normal case on a ROM without wpa_cli; the masked value is kept. */
+  fillMacs(rows, parseWpa(s.mac || ''));
+
+  return analyse(rows, parseLink(s.link || ''), parseNet(s.route, s.ping, s.dns));
+}
+
+/* Scan only: what the rescan loop polls while waiting for fresh results. */
+async function measureScan() {
+  const raw = await shText('sh ' + MODDIR + '/collect.sh scan');
+  return parseScan(sections(raw).scan || '');
 }

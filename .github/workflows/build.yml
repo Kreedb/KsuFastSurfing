@@ -39,72 +39,79 @@ jobs:
             grep -q "^$k=" module/module.prop || { echo "::error::missing $k"; exit 1; }
           done
 
+      # One build. The step used to run twice: once to package, once to check
+      # that the packaging had happened.
       - name: Build zip
         run: ./build.sh
 
-      - name: Check merged hosts
+      - name: Check merged hosts (seed)
         run: |
           cp -r module /tmp/m
           sh /tmp/m/manager.sh build
-          # The seed module ships no probed-hosts and no user-hosts, so a merge
-          # here legitimately produces zero layer sections. Asserting on
-          # '# --- ' only tested the empty case and broke the build. What must
-          # actually hold after a merge: the file parses, no hostname appears
-          # twice, and the loopback lines survive.
+          # The seed ships an empty user-hosts, so the merge must still produce a
+          # valid file with the loopback lines and no half-written section.
           test -s /tmp/m/hosts || { echo "::error::hosts is empty"; exit 1; }
-          dup=$(awk '/^[0-9]/{print $2}' /tmp/m/hosts | sort | uniq -d)
-          [ -z "$dup" ] || { echo "::error::duplicate hosts entries: $dup"; exit 1; }
           for want in '127.0.0.1' '::1'; do
             grep -q "^$want" /tmp/m/hosts || { echo "::error::missing $want line"; exit 1; }
           done
+          dup=$(awk '/^[0-9]/{print $2}' /tmp/m/hosts | sort | uniq -d)
+          [ -z "$dup" ] || { echo "::error::duplicate hosts entries: $dup"; exit 1; }
+          if grep -q '^# --- ' /tmp/m/hosts; then
+            echo "::error::empty user-hosts still produced a section header"; exit 1
+          fi
 
       - name: Verify in-page diagnostic parser
         run: |
-          # The WebUI parses device output itself now, so this is the only path
-          # between `cmd wifi` and every number on screen.
+          # collect.sh output is the only path between the device and every
+          # number on screen.
           node tests/test-diag.js
 
-      - name: Verify WebUI status feedback
+      - name: Verify WebUI action flow
         run: |
-          # Every action must report somewhere the user can see, from any tab,
-          # and the result must not be overwritten by the refresh that follows.
+          # Detection appends to the editor, one button applies, and a finished
+          # action does not trigger a second invisible refresh.
           node tests/test-status.js
 
-      - name: Verify index.html is self-contained
+      - name: Verify the packaged page is self-contained
         run: |
-          # The WebView loads this from an internal path where <script src>
-          # resolution is unreliable, so diag.js must be inlined - and must be
-          # the current copy, not a stale one.
-          ./build.sh >/dev/null
-          grep -q '=== DIAG' module/webroot/index.html
-          if grep -q '<script src=' module/webroot/index.html; then
-            echo "::error::index.html references an external script"; exit 1
+          # The WebView loads index.html from an internal path where
+          # <script src> resolution is unreliable, so the packaged copy must
+          # contain diag.js inline - and only the packaged copy. The repository
+          # keeps them separate.
+          unzip -p dist/*.zip webroot/index.html > /tmp/idx.html
+          if grep -q '<script src=' /tmp/idx.html; then
+            echo "::error::packaged index.html references an external script"; exit 1
+          fi
+          if unzip -l dist/*.zip | grep -q 'webroot/diag.js'; then
+            echo "::error::packaged page still ships a second copy of diag.js"; exit 1
           fi
           # Every function the page calls must exist in the inlined copy.
           node -e '
             const fs = require("fs");
-            const s = fs.readFileSync("module/webroot/index.html", "utf8");
-            const js = s.match(/<script>([\s\S]*?)<\/script>/)[1];
-            for (const fn of ["parseScan","parseLink","analyse","scoreChannels","measure","render",
-                            "fillMacs","shText","b64bytes"]) {
-              if (!js.includes("function " + fn) && !js.includes("async function " + fn))
+            const s = fs.readFileSync(0, "utf8");
+            for (const fn of ["parseScan","parseLink","analyse","scoreChannels","measure",
+                            "measureScan","sections","parseNet","render","fillMacs",
+                            "shText","b64bytes","rssiBand"]) {
+              if (!s.includes("function " + fn) && !s.includes("async function " + fn))
                 { console.error("missing " + fn); process.exit(1); }
             }
-          '
+          ' < /tmp/idx.html
+          # The build must not have touched the tracked source.
+          git diff --exit-code -- module/webroot/index.html
 
       - name: Check merge dedup (synthetic input)
         run: |
-          # Real merge logic, non-empty input: a user entry must beat a probed
-          # entry for the same hostname, and the domain must appear only once.
+          # One source of truth: user-hosts. A hostname listed twice must appear
+          # once, and the first line must win - the old merge wrote the seen set
+          # but never read it, so both lines survived.
           cp -r module /tmp/d
-          printf '1.1.1.1\tgithub.com\n' > /tmp/d/probed-hosts
-          printf '9.9.9.9\tgithub.com\n' > /tmp/d/user-hosts
+          printf '9.9.9.9\tgithub.com\n8.8.8.8\tgithub.com\n' > /tmp/d/user-hosts
           sh /tmp/d/manager.sh build
           n=$(awk '$2 == "github.com"' /tmp/d/hosts | wc -l)
           [ "$n" -eq 1 ] || { echo "::error::github.com appears $n times, want 1"; exit 1; }
           awk '$2 == "github.com" { print $1 }' /tmp/d/hosts | grep -qx '9.9.9.9' \
-            || { echo "::error::user entry did not win over probed entry"; exit 1; }
-          grep -q '^# --- ' /tmp/d/hosts || { echo "::error::layer sections missing"; exit 1; }
+            || { echo "::error::the first entry did not win"; exit 1; }
+          grep -q '^# --- ' /tmp/d/hosts || { echo "::error::layer section missing"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:

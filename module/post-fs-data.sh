@@ -7,11 +7,9 @@ LOG="$MODDIR/mount.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 : > "$LOG"
 
-i=0
-while [ ! -x "$MODDIR/manager.sh" ] && [ $i -lt 50 ]; do
-  sleep 0.1
-  i=$((i + 1))
-done
+# The module is unpacked before post-fs-data runs and customize.sh already set
+# 0755, so waiting for the file to become executable could only ever burn the
+# 10 s boot budget. Check once, log once, move on.
 [ -x "$MODDIR/manager.sh" ] || { log "manager.sh missing/not executable"; exit 0; }
 
 sh "$MODDIR/manager.sh" build >>"$LOG" 2>&1

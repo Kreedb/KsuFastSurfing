@@ -28,26 +28,27 @@ KernelSU 把 `/system` 挂载交给 metamodule（如 meta-overlayfs）。**只�
 
 ## 设计思路
 
-### 开机路径绝不联网
+### 开机不做任何检测
 
 `post-fs-data` 是阻塞式的，KernelSU 给 10 秒预算，联网会拖慢启动甚至触发看门狗。
 
 | 阶段 | 行为 | 联网 |
 |---|---|---|
-| `post-fs-data.sh` | 合并本地数据 → 注入国家码属性 → 挂载 | 否 |
-| `service.sh` | 开机后异步 `refresh`（探测 + 应用） | 是 |
+| `post-fs-data.sh` | 合并 `user-hosts` → 注入国家码属性 → 挂载 | 否 |
+| WebUI「检测 IP」 | 用户点击后才测速，只读 | 是 |
 
-代价是开机瞬间的 hosts 用的是上次探测结果，云端/网络数据在开机后补上。
+模块没有 `service.sh`：开机不会自动探测、不会自动改写 hosts、不会在后台发起任何请求。
+宿主的每一行内容都来自用户按下的那一次「保存并应用」。
 
-### 用户永远优先
+### 只有一个来源：user-hosts
 
 ```
-user-hosts  >  probed-hosts
+user-hosts  →  hosts  →  /system/etc/hosts
 ```
 
-不是“后写覆盖先写”——hosts 里同名域名的多行是未定义行为。实现是**先占位再跳过**：
-先把 `user-hosts` 的域名登记进去重表，探测层逐条查表，已占用的跳过。
-用户写 `5.6.7.8 github.com` 一定赢，且文件里不会出现两行同名。
+没有第二层、没有 `USE_PROBED` 开关、没有“探测结果自动生效”。检测的输出先追加到
+编辑框，用户看过、改过、按下保存，才会写文件。合并时同名域名只保留第一条（去重），
+所以文件里不会出现两行同名。
 
 ### 国家码双通道
 
@@ -67,21 +68,26 @@ user-hosts  >  probed-hosts
 
 ### 所有状态可查，所有操作可重入
 
-`manager.sh` 是唯一控制面，`post-fs-data` / `service` / `action` / 命令行都只是调它。
+`manager.sh` 是唯一控制面，`post-fs-data` / `action` / 命令行都只是调它。
 任何时刻都能手动跑一次把状态修正，不必重启。
 
 ---
 
 ## WebUI
 
-数据由**页面自己**读取和解析（`webroot/diag.js`，构建时内联进 `index.html`）。
-WebUI 桥以 root 执行命令，所以页面可以直接用：
+页面只用**一次** `ksu.exec` 取回全部数据：`collect.sh` 把扫描、链路、路由、ping
+和（必要时）supplicant 表分段打印，页面按段解析。
 
 ```
-cmd wifi list-scan-results   →  AP 列表
-cmd wifi status              →  当前链路
-ip route + ping              →  网关 / 丢包 / RTT / DNS
+##scan   cmd wifi list-scan-results
+##link   cmd wifi status
+##route  ip route
+##ping   网关 3 包
+##dns    一次外网解析
+##mac    wpa_cli scan_results（只有出现脱敏 BSSID 时才读）
 ```
+
+早前是每个数据源一次 `exec`，一次刷新 8-11 次桥往返，最后一个返回前页面不显示任何数字。
 
 这样不依赖设备上的 `awk`，也没有中间文件需要同步，屏幕上是刚测到的数据。
 （曾经有一套 `wifidiag.awk` + `jsonlib.awk` 的命令行管线，因 Android 的 awk 缺
@@ -111,11 +117,12 @@ SSID 进 DOM 前必须走 `esc()`，否则 `<img src=x onerror=...>` 这类名�
 干扰分数：RSSI 换算成线性功率后求和，同信道全权重、±4 邻道 1/4。
 候选信道只能来自标准栅格 + 实际观测到的信道——±4 扩散会产出 ch45/46/50 这类不存在的信道。
 
-### 状态条不能被子流程覆盖
+### 动作结束不再偷偷全量刷新
 
-`refreshAll()` 会重读状态，它**不能自己写状态条**：它由 `busy()` 的 finally 调用，
-一写就会把刚完成的操作结果冲掉（`探测完成：5/12` 变成 `就绪`）。
-启动流程也有 `userActed` 守卫，用户点过按钮后就不再输出「就绪」。
+`busy()` 只负责禁用按钮和兜底异常，**不在 finally 里重读数据**。每个动作自己决定要刷新什么：
+保存后只读 `status`，扫描后只读一次 `collect.sh`，检测完成后什么都不读。
+早前是每个按钮结束都跑一遍完整刷新，等于用户看不到的第二次等待。
+启动流程有 `userActed` 守卫，用户点过按钮后就不再输出「就绪」。
 
 ---
 
@@ -133,7 +140,8 @@ Magisk 同样适用（`cmd wifi` 需要 Android 10+）。
 
 - **概览**：当前链路（频率/信道/速率/信号）、周边频谱、建议信道、网关与 DNS
 - **信道**：全部 AP 按网络名分组（名称居中，下面逐行列出该名称的每个射频的 BSSID / 信道 / 频率 / RSSI / 类型），同名多射频一眼可见；另有 DFS 分带（UNII-2A / 2C / 3）
-- **hosts**：探测条目、手动条目、挂载状态；「探测并应用」按当前超时与线程重测
+- **hosts**：条目数 / 挂载状态；「检测 IP」把可用地址**追加到编辑框**，日志同屏滚动；
+  「保存并应用」是唯一会写文件并挂载的按钮
 - **国家码**：两位码点「应用」；「恢复自动」交还系统
 
 命令行：
@@ -141,9 +149,9 @@ Magisk 同样适用（`cmd wifi` 需要 Android 10+）。
 ```sh
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh status'
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'      # 国家码四层诊断
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh refresh'       # 探测 + 应用
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh apply'         # 合并 user-hosts 并挂载
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh set-cc JP'
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh cc-check'      # 国家码四层摘要
+su -c 'sh /data/adb/modules/KsuFastSurfing/collect.sh'               # 一次取回全部数据
 ```
 
 ## 配置
@@ -152,18 +160,17 @@ su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh cc-check'      # 国家码
 
 ```
 CC=US            # WiFi 国家码，两位字母
-USE_PROBED=1     # 1 启用本机探测结果
-PROBE_TIMEOUT=3  # 单次 TLS 握手超时（秒），1-20
-PROBE_THREADS=8  # 并发探测数，1-32
+PROBE_TIMEOUT=3  # 单次 TLS 握手超时（秒），1-10
+PROBE_THREADS=8  # 并发探测数，1-16
 ```
 
 探测的域名列表在 `module/domains`，一行一个，`#` 注释。加域名不必改脚本。
 
-候选 IP 的来源依次是：系统解析器（`getent`/`nslookup`，零售 ROM 通常没有）、
-`ping` 自身的解析结果、两个 DoH 端点（Cloudflare 与 Google 的 JSON API）。
-三种并行跑，取并集。可达性以 `time_connect` 判定，而不是 `curl` 的退出码——
-返回 403 或 TLS 失败的站点同样证明链路是通的，早前这些都被丢掉了。
-排序先看 TLS 握手是否完成，再看连接耗时，每个域名留最快的一个。
+候选 IP 的来源是一条**短路链**：`ping` 自身的解析（零售 ROM 一定有）、`getent`/`nslookup`
+（如果 ROM 带了）、最后才是两个 DoH 端点（Cloudflare → Google，前一个没结果才问下一个）。
+拿到地址就停，不再为一个已经有答案的域名多花 2-4 秒。
+可达性以 `time_connect` 判定，而不是 `curl` 的退出码——返回 403 或 TLS 失败的站点同样
+证明链路是通的。排序先看 TLS 握手是否完成，再看连接耗时，每个域名留最快的一个。
 
 BSSID 在 Android 12+ 由框架脱敏成 `68:19:**:**:37:c3`（第 3、4 段被抹）。
 页面跑在 root 下，会读 `wpa_supplicant` 的 `scan_results` 拿完整地址，用残存的
@@ -212,25 +219,15 @@ ch100-144 属 **UNII-2C（5470-5725 MHz）**，在美国是 DFS 频段（与雷�
 | 驱动/固件 | 厂商 BDF / `WCNSS_qcom_cfg.ini` | 部分能（本模块尝试 overlay） |
 | 射频能力 | 硬件与固件实际支持的信道表 | **不能** |
 
+WebUI 的「信道」页把这段拆开显示：`UNII-2A (52-64)` / `UNII-2C (100-144)` / `UNII-3 (149+)`
+三个计数按**信道号**分桶，不是频率区间——5725 MHz 正好是 ch149，用频率判定会把
+UNII-3 算成 UNII-2C。命令行等价输出：
+
 ```sh
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh cc-check'
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'
 ```
 
-字段（`unii2a` / `unii2c` / `unii3` 按**信道号**分桶，不是频率区间——
-5725 MHz 正好是 ch149，用频率判定会把 UNII-3 算成 UNII-2C）：
-
-```
-framework=US     # 框架认为的国家码
-kernel=00        # 内核 regdom（能读到才有），00 = 世界域，最常见的坏情况
-bss5g=40         # 扫到的 5GHz AP 数
-unii2c=1         # 扫到 ch100-144 的 AP 数，判断 DFS 的关键指标
-unii2a=6         # 扫到 ch52-64 的 AP 数
-unii3=20         # 扫到 ch149+ 的 AP 数
-dfs_total=7      # 上两个 DFS 段之和
-config=US        # 模块配置
-```
-
-若 `unii2c=0`，说明固件信道表里没有 UNII-2C，**没有任何国家码设置能让它出现**。
+看 `bss_unii2c`：若为 0，说明固件信道表里没有 UNII-2C，**没有任何国家码设置能让它出现**。
 
 完整四层转储（含 `iw reg get`、PHY 信道表、vendor ini）：
 
@@ -264,7 +261,7 @@ sh /data/adb/modules/KsuFastSurfing/manager.sh status
 | 探测有候选但全不可达 | 地址解析正常，443 连不上；看 `probe.log` 确认是否被墙 |
 | MAC 显示星号 | 该 ROM 没有 `wpa_cli`，只能拿框架脱敏值；不编造地址 |
 | 国家码不生效 | 厂商 ROM 固定在 vendor 层；看 `manager.log` 的 `cmd wifi` 返回 |
-| 国家码生效但无 ch100-144 | `cc-check`；`unii2c=0` 则是固件硬限制，软件无解 |
+| 国家码生效但无 ch100-144 | `diagnose` 的 `bss_unii2c=0` 则是固件硬限制，软件无解 |
 
 ## 频谱与帧注入的可行性
 
@@ -304,8 +301,8 @@ WebUI「信道」页的**硬件能力**卡片调的是同一个脚本。三项�
 
 ## 已知限制
 
-- 开机后第一次刷新是异步的，开机瞬间的 hosts 是上次结果
-- `cmd wifi force-country-code` 的返回文案各厂商不同，重试判断靠关键词匹配
+- 开机不检测，所以开机后 hosts 就是上次保存的内容；要更新就打开 WebUI 点一次
+- `cmd wifi force-country-code` 的返回文案各厂商不同，重试判断靠关键词匹配（0.3/0.6/1.2 s 退避）
 - 部分设备 vendor 层固定国家码，属性通道无效，只能靠 `cmd wifi`
 - 极老设备 `/data` 就绪慢时，`post-fs-data` 的等待窗口可能不够
 
@@ -314,9 +311,9 @@ WebUI「信道」页的**硬件能力**卡片调的是同一个脚本。三项�
 ## 开发
 
 ```sh
-./build.sh              # 打包到 dist/，同时把 diag.js 内联进 index.html
-node tests/test-diag.js # 网页解析器：敌意 SSID、RSSI 格式、UNII、推荐规则
-sh tests/check-diag.sh  # 命令行诊断输出
+./build.sh              # 打包到 dist/；在暂存副本里内联 diag.js，不改动仓库文件
+node tests/test-diag.js # 解析器：敌意 SSID、RSSI 格式、UNII、分段采集
+node tests/test-status.js # 交互：检测只追加、单按钮保存、动作后不做二次全量刷新
 ```
 
 提交前检查：
@@ -325,9 +322,10 @@ sh tests/check-diag.sh  # 命令行诊断输出
 ./build.sh
 for f in module/*.sh; do busybox ash -n "$f"; done
 node tests/test-diag.js
-sh tests/check-diag.sh
-./module/manager.sh build
-awk '/^[0-9]/{print $2}' module/hosts | sort | uniq -d   # 无输出
+node tests/test-status.js
+cp -r module /tmp/m && printf '1.1.1.1\tgithub.com\n2.2.2.2\tgithub.com\n' > /tmp/m/user-hosts
+sh /tmp/m/manager.sh build
+awk '/^[0-9]/{print $2}' /tmp/m/hosts | sort | uniq -d   # 无输出
 ```
 
 ### 目录
@@ -340,23 +338,23 @@ KsuFastSurfing/
 └── module/
     ├── module.prop       模块元数据
     ├── config            运行配置
-    ├── manager.sh        唯一控制面
-    ├── post-fs-data.sh   启动：不联网
-    ├── service.sh        开机后：异步刷新
-    ├── action.sh         管理器「运行」按钮
+    ├── manager.sh        唯一控制面（apply / status / set-cc / diagnose / capacity）
+    ├── collect.sh        一次采集：扫描 / 链路 / 路由 / ping / supplicant
+    ├── post-fs-data.sh   启动：只合并与挂载，不联网
+    ├── action.sh         管理器「运行」按钮（重新应用，不探测）
     ├── uninstall.sh      清理
     ├── customize.sh      安装期权限
     ├── diagnose.sh       四层信道诊断（只读）
     ├── capacity.sh       射频能力探测（survey / 监听 / 注入）
-    ├── probe.sh          本机 IP 探测（并发 + 超时）
-    ├── domains           待探测域名列表
+    ├── probe.sh          本机 IP 检测（只读，结果打到 stdout + probe.log）
+    ├── domains           待检测域名列表
     ├── hosts             合并产物（manager.sh build 生成）
-    ├── user-hosts        手动条目（最高优先级）
+    ├── user-hosts        唯一来源，由「保存并应用」写入
     ├── system.prop       国家码属性
     ├── system/etc/hosts  metamodule 路径备份
     └── webroot/
-        ├── index.html    WebUI（自包含）
-        └── diag.js       数据层：读接口 + 解析 + 分析
+        ├── index.html    WebUI（引用 diag.js；打包时内联进 dist 副本）
+        └── diag.js       数据层：解析 + 分析
 ```
 
 ### 脚本规范
@@ -389,7 +387,9 @@ JSON 转义逐字节循环。写新 awk 前先在 `busybox awk` 下跑一遍。
 - 模块路径用 `JSON.parse(ksu.moduleInfo()).moduleDir`，不要硬编码
 - 拿不到 `ksu` 时降级成可读提示
 - 不设页面背景与 `color-scheme`，交给 KernelSU
-- `index.html` 必须自包含（`diag.js` 构建时内联），WebView 对相对路径 `<script src>` 不可靠
+- **打包产物**的 `index.html` 必须自包含（构建时把 `diag.js` 内联进 `dist` 副本），
+  WebView 对相对路径 `<script src>` 不可靠；仓库里两者分开存放，构建不修改源文件
+- 按钮只做用户按下的那一件事：检测不写文件，保存不偷偷探测
 
 ## 许可
 

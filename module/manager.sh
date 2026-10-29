@@ -6,7 +6,6 @@ case "$0" in */*) MODDIR=${0%/*} ;; *) MODDIR=. ;; esac
 PATH=/data/adb/ksu/bin:/system/bin:/system/xbin:$PATH
 
 CONF="$MODDIR/config"
-PROBED="$MODDIR/probed-hosts"
 USER_HOSTS="$MODDIR/user-hosts"
 OUT="$MODDIR/hosts"
 SYS_HOSTS="$MODDIR/system/etc/hosts"
@@ -20,47 +19,27 @@ conf_get() {
 }
 
 # ---------- merged hosts ----------
+# One source: user-hosts. Detection results reach this file only because the
+# page put them in the user's editor and the user pressed save, so there is no
+# second layer to merge, no USE_PROBED switch, and no way for a background run
+# to change what is mounted.
 
 cmd_build() {
-  SEEN=$(mktemp 2>/dev/null || echo "$MODDIR/.seen.$$")
   TMP=$(mktemp 2>/dev/null || echo "$MODDIR/.hosts.$$")
-  : > "$SEEN"
-
-  # Reserve user-declared domains first so manual entries always win.
-  if [ -s "$USER_HOSTS" ]; then
-    awk '/^[ \t]*#/ {next} /^[ \t]*$/ {next}
-         ($1 ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/ || $1 ~ /^[0-9A-Fa-f:]+$/) {
-           for (i = 2; i <= NF; i++) { if ($i ~ /^#/) break; print $i }
-         }' "$USER_HOSTS" >> "$SEEN"
-  fi
 
   {
     echo "# Generated $(date '+%Y-%m-%d %H:%M:%S') by KsuFastSurfing"
-    echo "# layers: user-hosts > probed-hosts"
+    echo "# source: user-hosts (every entry was chosen by the user)"
     echo
     echo "127.0.0.1	localhost"
     echo "::1	localhost ip6-localhost ip6-loopback"
 
-    if [ -s "$PROBED" ] && [ "$(conf_get USE_PROBED 1)" = "1" ]; then
-      awk -v seen="$SEEN" '
-        BEGIN { while ((getline l < seen) > 0) if (l != "") s[l] = 1; close(seen); p = 0 }
-        /^[ \t]*#/ { next }
-        /^[ \t]*$/ { next }
-        {
-          # probed-hosts is "IP<TAB>host"
-          ip = $1; host = $2
-          if (ip !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) next
-          if (host == "" || host in s) next
-          if (!p) { print ""; print "# --- locally probed ---"; p = 1 }
-          print ip "\t" host
-          s[host] = 1
-        }' "$PROBED"
-    fi
-
     if [ -s "$USER_HOSTS" ]; then
-      : > "$SEEN.user"
-      awk -v seen="$SEEN.user" '
-        BEGIN { while ((getline l < seen) > 0) if (l != "") s[l] = 1; close(seen); p = 0 }
+      # The header is printed by the first entry, not up front, so an all-comment
+      # file does not produce an empty section. seen[] is what stops a hostname
+      # appearing twice - the previous version wrote the set but never read it,
+      # so two lines for one name both survived.
+      awk '
         /^[ \t]*#/ { next }
         /^[ \t]*$/ { next }
         {
@@ -68,9 +47,10 @@ cmd_build() {
           ip = $1
           for (i = 2; i <= NF; i++) {
             if ($i ~ /^#/) break
-            if (!p) { print ""; print "# --- user manual entries ---"; p = 1 }
+            if ($i in seen) next
+            seen[$i] = 1
+            if (!p) { print ""; print "# --- user entries ---"; p = 1 }
             print ip "\t" $i
-            s[$i] = 1
           }
         }' "$USER_HOSTS"
     fi
@@ -81,7 +61,6 @@ cmd_build() {
   chcon u:object_r:system_file:s0 "$TMP" 2>/dev/null
   mv "$TMP" "$OUT"
   [ -f "$SYS_HOSTS" ] && cp "$OUT" "$SYS_HOSTS" 2>/dev/null
-  rm -f "$SEEN" "$SEEN.user"
   log "built hosts: $(grep -c '^[0-9]' "$OUT" 2>/dev/null || echo 0) entries"
 }
 
@@ -144,15 +123,15 @@ cmd_apply_cc() {
     echo "cc=SKIP invalid"
     return 1
   fi
-  n=0
-  while [ $n -lt 5 ]; do
+  # Retries back off (0.3/0.6/1.2 s) and stop at the first success. The old
+  # version slept a flat 2 s five times, so a rejected code cost 10 s before
+  # the user saw the same failure.
+  for d in 0.3 0.6 1.2; do
     out=$(cmd wifi force-country-code enabled "$cc" 2>&1)
     case "$out" in
-      *rror*|*xception*|*"not found"*|*nknown*|*ailed*) ;;
+      *rror*|*xception*|*"not found"*|*nknown*|*ailed*) sleep "$d" ;;
       *) log "cc set to $cc"; echo "cc=$cc"; return 0 ;;
     esac
-    sleep 2
-    n=$((n + 1))
   done
   echo "cc=FAILED"
   return 1
@@ -175,13 +154,14 @@ cmd_apply_regdom() {
 
 cmd_status() {
   H=/system/etc/hosts
-  p=0; u=0
-  [ -s "$PROBED" ] && p=$(grep -c '^[0-9]' "$PROBED" 2>/dev/null)
+  u=0
   [ -s "$USER_HOSTS" ] && u=$(grep -vcE '^[ \t]*(#|$)' "$USER_HOSTS" 2>/dev/null)
 
-  printf 'probed=%s\n' "${p:-0}"
+  # user counts the lines the editor holds; entries counts what survived the
+  # merge (loopback and comments excluded), so a duplicate line is visible as
+  # "3 lines in, 2 in effect" instead of silently disappearing.
   printf 'user=%s\n' "${u:-0}"
-  printf 'entries=%s\n' "$(grep -c '^[0-9]' "$OUT" 2>/dev/null || echo 0)"
+  printf 'entries=%s\n' "$(awk '!($1 == "127.0.0.1" || $1 == "::1") && !/^[ \t]*(#|$)/' "$OUT" 2>/dev/null | grep -c .)"
 
   # Real mount check: compare the live file with the one we generated. The old
   # check looked for a domain that no longer exists and always said "unmounted".
@@ -197,7 +177,6 @@ cmd_status() {
   cur=$(cc_current)
   printf 'cc=%s\n' "$want"
   printf 'cur_cc=%s\n' "$cur"
-  printf 'use_probed=%s\n' "$(conf_get USE_PROBED 1)"
   printf 'timeout=%s\n' "$(conf_get PROBE_TIMEOUT 3)"
   printf 'threads=%s\n' "$(conf_get PROBE_THREADS 8)"
 }
@@ -205,17 +184,9 @@ cmd_status() {
 case "$1" in
   build)     cmd_build ;;
   remount)   cmd_remount ;;
-  probe)
-    sh "$MODDIR/probe.sh" ${2:+--print}
-    cmd_build
-    cmd_remount
-    ;;
-  refresh)
-    sh "$MODDIR/probe.sh" >/dev/null 2>&1
-    cmd_build
-    cmd_remount
-    cmd_apply_cc >/dev/null 2>&1
-    ;;
+  # `apply` is the only path that changes what is mounted. There is no
+  # probe/refresh shortcut any more: detection is a read-only tool the user
+  # runs from the page, and its output only becomes state when the user saves.
   apply)
     cmd_build
     cmd_remount
@@ -238,41 +209,13 @@ case "$1" in
     cmd_apply_regdom >/dev/null 2>&1 || true
     ;;
   status)    cmd_status ;;
-  regdom)    cmd_apply_regdom ;;
   # Two read-only reports, and nothing else: `diagnose` walks the four layers
-  # that decide which channels exist, `cc-check` counts what is actually on air.
-  # The per-AP analysis lives in the WebUI, which parses the same interfaces in
-  # the page (see webroot/diag.js). The awk pipeline behind the old `wifi`
-  # subcommands is gone: Android's awk has no strftime and no math functions, so
-  # every feature had to be written around those gaps.
+  # that decide which channels exist, `capacity` asks the driver what it can do.
+  # Per-AP analysis lives in the WebUI (webroot/diag.js); `cc-check` was a third
+  # copy of the same channel bucketing and is gone with it.
   diagnose)  sh "$MODDIR/diagnose.sh" ;;
   # Hardware capability report: what this radio can and cannot do, so a feature
   # request can be answered with the device's own answer instead of a guess.
   capacity)  sh "$MODDIR/capacity.sh" ${2:+--json} ;;
-  cc-check)
-    printf 'framework=%s\n' "$(cc_current)"
-    sr=$(cmd wifi list-scan-results 2>&1)
-    # Bucket by channel number, not by frequency range: 5725 MHz is the UNII-2C/
-    # UNII-3 fence, so a frequency test classifies ch149 wrongly.
-    echo "$sr" | awk '
-      NR > 1 && $2 + 0 >= 2400 {
-        f = $2 + 0
-        if (f <= 2500) next                      # 2.4G is not interesting here
-        if (f <= 5895) c = int((f - 5000) / 5); else c = int((f - 5950) / 5)
-        n++
-        if (c >= 52 && c <= 64)                { dfs++; u2a++ }
-        if (c >= 100 && c <= 144)              { dfs++; u2c++ }
-        if (c >= 149)                          u3++
-      }
-      END {
-        printf "bss5g=%d\n", n + 0
-        printf "unii2c=%d\n", u2c + 0
-        printf "unii2a=%d\n", u2a + 0
-        printf "unii3=%d\n", u3 + 0
-        printf "dfs_total=%d\n", dfs + 0
-      }'
-    printf 'config=%s\n' "$(conf_get CC US)"
-    printf 'kernel=%s\n' "$( [ -r /sys/module/cfg80211/parameters/ieee80211_regdom ] && cat /sys/module/cfg80211/parameters/ieee80211_regdom || echo unknown )"
-    ;;
-  *) echo "usage: manager.sh {probe|refresh|apply|status|set-cc XX|regdom|diagnose|capacity|cc-check|build|remount}"; exit 2 ;;
+  *) echo "usage: manager.sh {apply|status|set-cc XX|diagnose|capacity|build|remount}"; exit 2 ;;
 esac

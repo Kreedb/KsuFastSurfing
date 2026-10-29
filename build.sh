@@ -16,40 +16,43 @@ VER=$(sed -n 's/^version=//p'    "$MOD/module.prop" | tail -1)
 OUT="$DIST/$ID-$VER.zip"
 mkdir -p "$DIST"
 
-# index.html must be self-contained: the WebView loads it from an internal path
-# where <script src> resolution has been unreliable. diag.js is kept separate so
-# node can load it for tests, and inlined here.
-inline_diag() {
-  idx="$MOD/webroot/index.html"
-  src="$MOD/webroot/diag.js"
-  [ -f "$src" ] || { echo "error: webroot/diag.js missing" >&2; exit 1; }
-  grep -q '=== DIAG' "$idx" || { echo "error: index.html has no DIAG marker" >&2; exit 1; }
-  python3 - "$idx" "$src" << 'PYINLINE'
+# index.html references diag.js for development, and the packaged copy inlines
+# it: the WebView loads the page from an internal path where <script src>
+# resolution has been unreliable. The substitution happens on a staged copy, so
+# the build never rewrites a tracked file (the old version inlined in place,
+# which is why the repository carried a second, 445-line copy of diag.js).
+STAGE=$(mktemp -d 2>/dev/null || echo "$DIST/.stage.$$")
+trap 'rm -rf "$STAGE"' EXIT
+cp -a "$MOD/." "$STAGE/"
+python3 - "$STAGE/webroot/index.html" "$STAGE/webroot/diag.js" << 'PYINLINE'
 import pathlib, sys
 idx, src = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 s = idx.read_text()
-start = s.index('/* === DIAG')
-end = s.index('/* === end DIAG === */')
-s = s[:start] + '/* === DIAG (source: webroot/diag.js, inlined by build.sh) === */\n' + src.read_text() + '\n' + s[end:]
+tag = '<script src="diag.js"></script>'
+if tag not in s:
+    sys.exit("error: index.html is missing the diag.js script tag")
+s = s.replace(tag, "<script>\n" + src.read_text() + "\n</script>", 1)
 idx.write_text(s)
-print(f"inlined {src.name} into {idx.name}")
 PYINLINE
-}
+# The packaged page must not reference an external script.
+if grep -q '<script src=' "$STAGE/webroot/index.html"; then
+  echo "error: staged index.html still references an external script" >&2; exit 1
+fi
 
-inline_diag
-
-python3 - "$MOD" "$OUT" << 'PY'
+python3 - "$STAGE" "$OUT" << 'PY'
 import stat, sys, zipfile, pathlib
 
 src, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 
 # Executables must keep 0755; data files must be 0644.
 EXEC = {
-    "post-fs-data.sh", "service.sh", "action.sh",
-    "uninstall.sh", "customize.sh", "manager.sh", "diagnose.sh", "probe.sh", "capacity.sh",
+    "post-fs-data.sh", "action.sh",
+    "uninstall.sh", "customize.sh", "manager.sh", "diagnose.sh", "probe.sh",
+    "capacity.sh", "collect.sh",
 }
-# Runtime artifacts never ship.
-SKIP = {"manager.log", "mount.log", "service.log"}
+# Runtime artifacts never ship, and neither does the page's source copy: the
+# packaged index.html already contains it.
+SKIP = {"manager.log", "mount.log", "service.log", "diag.js"}
 
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     for p in sorted(src.rglob("*")):

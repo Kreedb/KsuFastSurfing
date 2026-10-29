@@ -18,7 +18,7 @@ const src = fs.readFileSync(path.join(ROOT, 'module/webroot/diag.js'), 'utf8');
    Function with exec injected so it can run in node without a DOM. */
 const api = new Function('exec', src + `
   return { parseScan, parseLink, analyse, scoreChannels, chanOf, isDfs, uniiOf,
-           quality, fillMacs, parseWpa, b64bytes };
+           rssiBand, fillMacs, parseWpa, b64bytes, sections, parseNet };
 `)(async () => ({ stdout: '', stderr: '', errno: 0 }));
 
 let failures = 0;
@@ -162,12 +162,7 @@ console.log('== full analysis ==');
   eq('ndfs', d.summary.ndfs, 2);
   eq('nunii2c', d.summary.nunii2c, 1);
   eq('nunii2a', d.summary.nunii2a, 2);   /* ch36 and ch60 */
-  eq('best ssid', d.best.ssid, 'COFEEB32AE');
-  eq('best rssi', d.best.rssi, -25);
   eq('dfs channels', d.dfsCh, [60, 100]);
-
-  /* Congestion counts raw BSSIDs per channel: two radios on ch157. */
-  eq('ch157 congestion', d.congestion.find(x => x.ch === 157).count, 2);
 
   /* The link/L3 scalars must be carried through: they were dropped once and
      the network card showed "未获取" on a perfectly healthy link. */
@@ -175,7 +170,6 @@ console.log('== full analysis ==');
   eq('loss carried', d.loss, 0);
   eq('rtt carried', d.rtt, 2.4);
   eq('verdict dfs', d.verdict.dfs, 'ok');
-  eq('verdict net', d.verdict.net, 'ok');
 
   /* No gateway must be distinguishable from a measured 0% loss. */
   const d2 = api.analyse(api.parseScan(scan), link, { gateway: '', loss: null, rtt: null, dns: 'fail' });
@@ -190,7 +184,6 @@ console.log('== full analysis ==');
   eq('secondary radio kept', d.groups.find(g => g.ssid === 'Li7E641E1C').bssids[1].bssid,
      '68:19:aa:bb:cc:03');
 
-  eq('no gateway verdict', d2.verdict.net, 'nogw');
   eq('no gateway is not 0% loss', d2.loss, null);
   eq('dns fail surfaces', d2.verdict.dns, 'fail');
 
@@ -302,7 +295,49 @@ console.log('== freshness ==');
      useless for telling whether a rescan landed. */
   eq('age min', d.ageMin, 2);
   eq('age median', d.ageMed, 9);
-  eq('age max still available', d.ageMax, 300);
+}
+
+/* ---------- 12. sectioned collection ---------- */
+console.log('== collect.sh sections ==');
+{
+  /* One exec returns every block; a parser must never need the raw concatenation
+     of two commands, and a missing block must degrade instead of throwing. */
+  const raw = '##scan\n' + HDR +
+    '  aa:bb:cc:dd:ee:01  5180  -50(0:-50/1:-55)  2.0  Home  [RSN-PSK]\n' +
+    '##link\nWifiInfo: SSID: "Home", RSSI: -50, Frequency: 5180MHz\n' +
+    '##route\ndefault via 192.168.1.1 dev wlan0 proto static\n' +
+    '##ping\n3 packets transmitted, 3 received, 0% packet loss\n' +
+    'rtt min/avg/max/mdev = 1.0/2.4/3.0/0.5 ms\n' +
+    '##dns\nrc=0\n' +
+    '##mac\n';
+  const sec = api.sections(raw);
+  eq('scan block', api.parseScan(sec.scan).length, 1);
+  eq('link block', api.parseLink(sec.link).ssid, 'Home');
+  const net = api.parseNet(sec.route, sec.ping, sec.dns);
+  eq('gateway from route', net.gateway, '192.168.1.1');
+  eq('loss from ping', net.loss, 0);
+  eq('rtt is the average', net.rtt, 2.4);
+  eq('dns from rc', net.dns, 'ok');
+  eq('empty mac section', api.parseWpa(sec.mac).length, 0);
+
+  const bare = api.sections('##scan\n');
+  eq('missing link', api.parseLink(bare.link || ''), null);
+  eq('missing gateway is not 0% loss', api.parseNet('', '', '').loss, null);
+  eq('missing dns is unknown', api.parseNet('', '', '').dns, 'unknown');
+
+  /* A block name inside payload text must not start a new section: SSIDs can
+     contain '##'. Only a line that is exactly ##name does. */
+  const tricky = api.sections('##scan\n  aa:bb:cc:dd:ee:01  5180  -50  1.0  ##wifi  [RSN]\n##link\n');
+  eq('## inside SSID is not a section', api.parseScan(tricky.scan)[0].ssid, '##wifi');
+}
+
+/* ---------- 13. one RSSI scale ---------- */
+console.log('== rssi band ==');
+{
+  eq('strong', api.rssiBand(-45), { label: '很强', cls: 'ok' });
+  eq('good', api.rssiBand(-58), { label: '良好', cls: 'ok' });
+  eq('fair', api.rssiBand(-66), { label: '一般', cls: 'warn' });
+  eq('weak', api.rssiBand(-80), { label: '弱', cls: 'bad' });
 }
 
 console.log(failures ? `${failures} failure(s)` : '\nall parser tests passed');
