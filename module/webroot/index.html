@@ -151,9 +151,12 @@
     <div class="muted">DFS 为雷达共存信道（52-64 / 100-144），默认被动扫描，发现更慢。</div>
   </div>
   <div class="card">
-    <h2>DFS 专用</h2>
+    <h2>DFS 分带</h2>
     <div class="row"><span class="k">可见 DFS AP</span><span class="v" id="d-ndfs">—</span></div>
+    <div class="row"><span class="k">UNII-2A (52-64)</span><span class="v" id="d-u2a">—</span></div>
+    <div class="row"><span class="k">UNII-2C (100-144)</span><span class="v" id="d-u2c">—</span></div>
     <div class="row"><span class="k">DFS 信道</span><span class="v" id="d-ch">—</span></div>
+    <div class="muted">UNII-2C 才是信道 100 所在的那一段。两者分开计数，因为只有 100-144 能回答问题"能不能用 ch100"。</div>
   </div>
 </section>
 
@@ -283,6 +286,13 @@ TABS.forEach(([b,p]) => {
 
 function setV(el, text, cls) { el.textContent = text; el.className = 'v' + (cls ? ' ' + cls : ''); }
 
+/* SSIDs are chosen by whoever runs the neighbouring AP, so they are untrusted
+   input. They must never reach innerHTML raw: an SSID literally named
+   <img src=x onerror=...> would execute in the WebUI's WebView. */
+const esc = s => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
 function parseKV(txt) {
   const m = {};
   (txt || '').split('\n').forEach(l => {
@@ -292,31 +302,42 @@ function parseKV(txt) {
   return m;
 }
 
-/* parse wifidiag api output: sections + key=value + ap rows */
+/* The diagnostic output is JSON, produced by wifidiag.awk in a single pass.
+   Do not go back to a delimiter protocol: SSIDs can legitimately contain '|',
+   '=', quotes and backslashes, and splitting on any of them silently shifts
+   every following column (a real AP named "ap fake=1|2" parsed as
+   freq=2 ch=5745 rssi=149 with the old key=value format). */
 function parseDiag(txt) {
-  const d = { ap: [], free: [], score: [], kv: {} };
-  let sec = '';
-  (txt || '').split('\n').forEach(l => {
-    if (!l) return;
-    if (l[0] === '[') { sec = l.slice(1, -1); return; }
-    if (l.startsWith('ap ')) {
-      const f = l.slice(3).split('|');
-      d.ap.push({ ssid: f[0], freq: +f[1], ch: +f[2], rssi: +f[3], age: +f[4], dfs: +f[5] });
-      return;
-    }
-    if (l.startsWith('sc ')) {
-      const f = l.slice(3).split('|');
-      d.score.push({ ch: +f[0], load: +f[1], co: +f[2], adj: +f[3], dfs: +f[4], seen: +f[5] });
-      return;
-    }
-    const i = l.indexOf('=');
-    if (i <= 0) return;
-    const k = l.slice(0, i), v = l.slice(i + 1);
-    if (sec === 'congestion') d.free.push({ ch: k.replace('ch',''), n: +v });
-    d.kv[k] = v;
-  });
-  d.free.sort((a, b) => a.n - b.n);
-  return d;
+  let d = null;
+  try { d = JSON.parse(txt); } catch (e) { d = null; }
+  if (!d) return { ap: [], free: [], score: [], kv: {}, error: 'bad-json' };
+  const s = d.summary || {}, l = d.link || {}, net = d.net || {}, v = d.verdict || {};
+
+  /* Flatten into the kv map the renderers use, so the layout code stays put
+     and there is exactly one place that knows the JSON shape. */
+  const kv = {
+    total: s.total, n24: s.n24, n5: s.n5, n6: s.n6,
+    ndfs: s.ndfs, nu3: s.nunii3, nu2c: s.nunii2c, nu2a: s.nunii2a,
+    best_rssi: (d.best || {}).rssi, best_ssid: (d.best || {}).ssid,
+    best_freq: (d.best || {}).freq,
+    freq: l.freq, conn_ch: l.channel, rssi: l.rssi,
+    conn_quality: l.quality, link_mbps: l.link_mbps, standard: l.standard,
+    ssid: d.link_ssid || '',
+    age_max: (d.scan || {}).age_max, aps: (d.scan || {}).aps,
+    dfs_ch: ((d.channels || {}).dfs || []).join(' '),
+    gw: net.gateway, loss: net.loss, gw_rtt: net.rtt_ms, dns: net.dns,
+    multi: (d.roam || {}).multi,
+    dfs: v.dfs, net: v.net, dns_l3: v.dns_l3, best_ch: v.best_ch
+  };
+
+  /* The old text format carried a prose hint; derive it from the verdict so
+     the wording lives in one language only. */
+  if (v.dfs === 'ok') kv.note = 'DFS 信道可见；若设置界面仍看不到，属于展示/缓存问题，手动添加网络即可连';
+  else if (v.dfs === 'none') kv.note = '附近没有 DFS AP；可靠近路由器后重新扫描';
+  else if (v.dfs === 'nodata') kv.note = '完全没有扫到 5GHz';
+
+  const free = (d.congestion || []).map(x => ({ ch: String(x.ch), n: x.count }));
+  return { ap: d.aps || [], free, score: d.score || [], kv, error: null };
 }
 
 function qcls(r) {
@@ -328,9 +349,10 @@ function qcls(r) {
 let lastDiag = null;
 
 async function loadDiag() {
-  const r = await run('sh ' + MGR + ' wifi api 2>&1');
+  const r = await run('sh ' + MGR + ' wifi json 2>&1');
   if (r === null) return;
   const d = parseDiag(r);
+  if (d.error) { out('诊断数据解析失败（' + d.error + '），请运行 manager.sh wifi 查看原始输出'); return; }
   lastDiag = d;
   const kv = d.kv;
 
@@ -369,11 +391,13 @@ async function loadDiag() {
   setV($('n-age'), kv.aps ? (age + ' 秒前 · ' + kv.aps + ' AP') : '—',
        kv.aps ? (age <= 20 ? 'ok' : 'warn') : '');
   setV($('n-gw'), (kv.gw && kv.gw !== 'none') ? kv.gw : '未获取');
+  /* JSON yields null for "not measured", which the text format expressed as
+     the string 'none'. Both must render as em dash, never as "null%". */
   const loss = kv.loss;
-  const hasLoss = loss !== undefined && loss !== 'none';
+  const hasLoss = loss !== null && loss !== undefined && loss !== 'none';
   setV($('n-loss'), hasLoss ? (loss + '%') : '—', hasLoss ? (+loss === 0 ? 'ok' : 'bad') : '');
-  setV($('n-rtt'), (kv.gw_rtt && kv.gw_rtt !== 'none') ? (kv.gw_rtt + ' ms') : '—',
-       (kv.gw_rtt && kv.gw_rtt !== 'none') ? (+kv.gw_rtt <= 10 ? 'ok' : 'warn') : '');
+  const hasRtt = kv.gw_rtt !== null && kv.gw_rtt !== undefined && kv.gw_rtt !== 'none';
+  setV($('n-rtt'), hasRtt ? (kv.gw_rtt + ' ms') : '—', hasRtt ? (+kv.gw_rtt <= 10 ? 'ok' : 'warn') : '');
   const dns = kv.dns_l3 || kv.dns;
   setV($('n-dns'), dns === 'ok' ? '正常' : (dns === 'fail' ? '失败' : '未知'),
        dns === 'ok' ? 'ok' : (dns === 'fail' ? 'bad' : ''));
@@ -381,7 +405,7 @@ async function loadDiag() {
        +(kv.multi || 0) > 0 ? 'ok' : '');
 
   $('o-best').innerHTML = d.ap.slice(0, 5).map(a =>
-    `<tr><td>${a.ssid || '(隐藏)'}</td><td>${a.ch}</td>
+    `<tr><td>${esc(a.ssid) || '(隐藏)'}</td><td>${a.ch}</td>
      <td class="n ${qcls(a.rssi)}">${a.rssi}</td></tr>`).join('') || '<tr><td>—</td></tr>';
 
   /* channel page */
@@ -389,15 +413,17 @@ async function loadDiag() {
   $('ap-rows').innerHTML = d.ap.slice(0, 40).map(a => {
     const t = a.dfs ? '<span class="tag dfs">DFS</span>' :
               (a.ch >= 149 ? '<span class="tag u3">UNII-3</span>' : '<span class="tag">普通</span>');
-    return `<tr><td>${a.ssid || '(隐藏)'}</td><td>${a.ch}</td><td>${a.freq}</td>
+    return `<tr><td>${esc(a.ssid) || '(隐藏)'}</td><td>${a.ch}</td><td>${a.freq}</td>
             <td class="n ${qcls(a.rssi)}">${a.rssi}</td><td>${t}</td></tr>`;
   }).join('') || '<tr><td>—</td></tr>';
   setV($('d-ndfs'), (kv.ndfs || 0) + ' 个', +(kv.ndfs||0) > 0 ? 'ok' : 'bad');
+  setV($('d-u2a'), (kv.nu2a || 0) + ' 个');
+  setV($('d-u2c'), (kv.nu2c || 0) + ' 个');
   setV($('d-ch'), (kv.dfs_ch || '').trim() || '无');
 
   /* country page */
   setV($('c-5g'), (kv.n5 || 0) + ' 个');
-  setV($('c-unii2c'), (kv.ndfs || 0) + ' 个', +(kv.ndfs||0) > 0 ? 'ok' : 'bad');
+  setV($('c-unii2c'), (kv.nu2c || 0) + ' 个', +(kv.nu2c||0) > 0 ? 'ok' : 'bad');
   setV($('c-unii3'), (kv.nu3 || 0) + ' 个');
 }
 
@@ -441,7 +467,7 @@ function busy(btn, fn) {
 /* ---------- actions ---------- */
 $('btn-scan').onclick = busy($('btn-scan'), async () => {
   out('扫描中…');
-  const r = await run('cmd wifi start-scan; sleep 6; sh ' + MGR + ' wifi api 2>&1');
+  const r = await run('cmd wifi start-scan; sleep 6; sh ' + MGR + ' wifi json 2>&1');
   out(r === null ? '无法执行' : '扫描完成');
 });
 
@@ -506,7 +532,7 @@ function clamp(v, a, b) { return isNaN(v) ? a : Math.max(a, Math.min(b, v)); }
 (async function init() {
   if (!hasKsu()) {
     out('未检测到 KernelSU WebUI 接口。请从管理器打开本模块的 WebUI。\n' +
-        '命令行：sh ' + MGR + ' wifi api');
+        '命令行：sh ' + MGR + ' wifi json');
     return;
   }
   await resolveModDir();

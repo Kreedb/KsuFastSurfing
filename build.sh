@@ -9,6 +9,11 @@ MOD="$ROOT/module"
 DIST="$ROOT/dist"
 
 [ -f "$MOD/module.prop" ] || { echo "error: module/module.prop not found" >&2; exit 1; }
+# The diagnostic pipeline is awk, not sh: if these are missing the module still
+# installs but every scan silently fails, so fail the build instead.
+for f in wifidiag.awk jsonlib.awk; do
+  [ -f "$MOD/$f" ] || { echo "error: module/$f not found" >&2; exit 1; }
+done
 
 ID=$(sed -n 's/^id=//p'          "$MOD/module.prop" | tail -1)
 VER=$(sed -n 's/^version=//p'    "$MOD/module.prop" | tail -1)

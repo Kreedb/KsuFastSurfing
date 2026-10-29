@@ -241,6 +241,7 @@ case "$1" in
   regdom)    cmd_apply_regdom ;;
   diagnose)  sh "$MODDIR/diagnose.sh" ;;
   wifi)      sh "$MODDIR/wifidiag.sh" ${2:-scan} ;;
+  wifi-json) sh "$MODDIR/wifidiag.sh" ${2:-json} ;;
   wifi-api)  sh "$MODDIR/wifidiag.sh" api ;;
   cc-check)
     printf 'framework=%s\n' "$(cc_current)"
@@ -267,5 +268,5 @@ case "$1" in
     printf 'config=%s\n' "$(conf_get CC US)"
     printf 'kernel=%s\n' "$( [ -r /sys/module/cfg80211/parameters/ieee80211_regdom ] && cat /sys/module/cfg80211/parameters/ieee80211_regdom || echo unknown )"
     ;;
-  *) echo "usage: manager.sh {probe|refresh|apply|status|set-cc XX|regdom|wifi|wifi-api|diagnose|cc-check|build|remount}"; exit 2 ;;
+  *) echo "usage: manager.sh {probe|refresh|apply|status|set-cc XX|regdom|wifi|wifi-json|wifi-api|diagnose|cc-check|build|remount}"; exit 2 ;;
 esac

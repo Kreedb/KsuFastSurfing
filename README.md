@@ -157,6 +157,7 @@ KsuFastSurfing/
 ├── LICENSE              GPL-3.0
 ├── build.sh             打包脚本，产出 dist/<id>-<version>.zip
 ├── dist/                构建产物（不入库，KsuFastSurfing-vX.Y.zip）
+├── tests/               回归测试（敌意 SSID / JSON 结构 / hosts 合并）
 └── module/              模块本体，原样打进 zip 根目录
     ├── module.prop
     ├── config           运行配置（CC / USE_PROBED / PROBE_TIMEOUT / PROBE_THREADS）
@@ -173,7 +174,9 @@ KsuFastSurfing/
     ├── user-hosts       用户手动条目（最高优先级）
     ├── domains          参与探测的域名列表
     ├── probe.sh         本地 IP 探测（并发 + 超时）
-    ├── wifidiag.sh      WiFi 诊断：采集/解析/分析
+    ├── wifidiag.sh      WiFi 诊断：采集 + 调度（薄壳）
+    ├── wifidiag.awk     解析/分析/渲染，一趟输出 text 或 JSON
+    ├── jsonlib.awk      JSON 字符串转义（按字节，gawk/busybox 一致）
     ├── system/etc/hosts metamodule 路径备份
     └── webroot/         WebUI
 ```
@@ -233,8 +236,8 @@ KsuFastSurfing/
 ```sh
 ./build.sh                                   # 打包通过
 for f in module/*.sh; do busybox ash -n "$f"; done   # 语法
+sh tests/check-diag.sh                       # 诊断输出（敌意 SSID、JSON 结构）
 ./module/manager.sh build                    # 合并可用
-grep -c '^# ---' module/hosts                # 分层存在
 awk '/^[0-9]/{print $2}' module/hosts | sort | uniq -d   # 无重复（应无输出）
 ```
 
@@ -378,6 +381,46 @@ AP 就能毁掉整个信道。所以先按 `10^(rssi/10)` 把 dBm 换算成线�
 2. **同分时优先本次扫描里真实出现过的信道**，未扫描到的信道只是理论值，
    可能被射频层过滤掉了。
 
+### 输出格式：JSON，不是分隔符
+
+诊断结果有两条出口：`manager.sh wifi`（人读的 key=value 分段）和
+`manager.sh wifi-json`（WebUI 读的 JSON）。**两者由同一次 awk 计算渲染**，
+所以不会出现「网页和命令行的数字不一样」。
+
+数据面必须是 JSON，原因不是时髦：
+
+```c
+/* 旧格式：ap SSID|freq|ch|rssi|age|dfs */
+if (l.startsWith('ap ')) { const f = l.slice(3).split('|'); ... }
+```
+
+SSID 是邻居路由器起的名字，**可以包含 `|`、`=`、引号、反斜杠、空格**。
+用 `|` 拼字段再用 `|` 拆，遇到这种 SSID 会让后面每一列错位。实测一个有
+真实可能的 SSID `ap fake=1|2` 被解析成 `freq=2, ch=5745, rssi=149` ——
+数字完全错误，界面却照常显示，没有任何报错。`=` 同理会影响 key=value 解析。
+
+因此改为由 `wifidiag.awk` 一趟扫描直接输出 JSON，中间不存在可被破坏的文本编码。
+`tests/check-diag.sh` 用含 `|`、`=`、`"`、`\`、中文的 SSID 做回归，busybox awk
+与 gawk 各跑一遍。
+
+顺带修掉两处：
+
+- **SSID 必须转义再进 DOM**。SSID 由他人控制，直接拼进 `innerHTML` 会被
+  `<img src=x onerror=...>` 这类名字注入。UI 里所有 SSID 走 `esc()`。
+- **AWK 的数组键是字符串**。`for (c in cand)` 取出的 `c` 是 `"4"` 而不是 `4`，
+  于是 `c > 34` 变成字典序比较（`"4" > "34"` 为真），2.4GHz 信道被错排到
+  5GHz 前面。所有从数组键取出的数字都要 `+0`。
+
+### 信道推荐的两条排序规则
+
+1. **5GHz 整体排在 2.4GHz 之前**。2.4GHz 只有三个互不重叠的信道，
+   且被周围所有设备共享，再"干净"也不如一个忙碌的 5GHz 信道。
+2. **DFS 排在所有非 DFS 之后**，哪怕分数为 0。空 DFS 信道算术上最干净，
+   却是最差的建议：只能被动扫描（隐藏 SSID 永远看不到），还会被雷达驱逐。
+
+只按干扰分数排序时，参考数据上的答案恒为 `ch 108`（一个空 DFS 信道）——
+算术没错，建议无用。
+
 ### busybox awk 没有数学函数
 
 Android 的 toybox/busybox `awk` 是**不编译 math 支持**的，`10^1.5`、`log()`
@@ -409,7 +452,8 @@ Android 的 toybox/busybox `awk` 是**不编译 math 支持**的，`10^1.5`、`l
 
 ```sh
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh wifi'          # 采集+分析
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh wifi-api'      # 给 WebUI 的原始输出
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh wifi-json'     # JSON，给 WebUI 或脚本
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh wifi-api'      # 旧文本格式（兼容保留）
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh cc-check'      # 只看国家码相关
 ```
 

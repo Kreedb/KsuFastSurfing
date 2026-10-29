@@ -46,9 +46,38 @@ jobs:
         run: |
           cp -r module /tmp/m
           sh /tmp/m/manager.sh build
+          # The seed module ships no probed-hosts and no user-hosts, so a merge
+          # here legitimately produces zero layer sections. Asserting on
+          # '# --- ' only tested the empty case and broke the build. What must
+          # actually hold after a merge: the file parses, no hostname appears
+          # twice, and the loopback lines survive.
+          test -s /tmp/m/hosts || { echo "::error::hosts is empty"; exit 1; }
           dup=$(awk '/^[0-9]/{print $2}' /tmp/m/hosts | sort | uniq -d)
           [ -z "$dup" ] || { echo "::error::duplicate hosts entries: $dup"; exit 1; }
-          grep -q '^# --- ' /tmp/m/hosts || { echo "::error::no layers"; exit 1; }
+          for want in '127.0.0.1' '::1'; do
+            grep -q "^$want" /tmp/m/hosts || { echo "::error::missing $want line"; exit 1; }
+          done
+
+      - name: Verify diagnose output (JSON + text)
+        run: |
+          # Fixtures and assertions live in tests/, not inline: a nested heredoc
+          # inside a YAML block scalar is unparsable, and the assertions are
+          # worth reading on their own.
+          sh tests/check-diag.sh
+
+      - name: Check merge dedup (synthetic input)
+        run: |
+          # Real merge logic, non-empty input: a user entry must beat a probed
+          # entry for the same hostname, and the domain must appear only once.
+          cp -r module /tmp/d
+          printf '1.1.1.1\tgithub.com\n' > /tmp/d/probed-hosts
+          printf '9.9.9.9\tgithub.com\n' > /tmp/d/user-hosts
+          sh /tmp/d/manager.sh build
+          n=$(awk '$2 == "github.com"' /tmp/d/hosts | wc -l)
+          [ "$n" -eq 1 ] || { echo "::error::github.com appears $n times, want 1"; exit 1; }
+          awk '$2 == "github.com" { print $1 }' /tmp/d/hosts | grep -qx '9.9.9.9' \
+            || { echo "::error::user entry did not win over probed entry"; exit 1; }
+          grep -q '^# --- ' /tmp/d/hosts || { echo "::error::layer sections missing"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
