@@ -85,18 +85,12 @@ jobs:
             const fs = require("fs");
             const s = fs.readFileSync("module/webroot/index.html", "utf8");
             const js = s.match(/<script>([\s\S]*?)<\/script>/)[1];
-            for (const fn of ["parseScan","parseLink","analyse","scoreChannels","measure","render"]) {
+            for (const fn of ["parseScan","parseLink","analyse","scoreChannels","measure","render",
+                            "fillMacs","shText","b64bytes"]) {
               if (!js.includes("function " + fn) && !js.includes("async function " + fn))
                 { console.error("missing " + fn); process.exit(1); }
             }
           '
-
-      - name: Verify diagnose output (JSON + text)
-        run: |
-          # Fixtures and assertions live in tests/, not inline: a nested heredoc
-          # inside a YAML block scalar is unparsable, and the assertions are
-          # worth reading on their own.
-          sh tests/check-diag.sh
 
       - name: Check merge dedup (synthetic input)
         run: |

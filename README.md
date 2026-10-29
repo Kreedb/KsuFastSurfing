@@ -84,7 +84,8 @@ ip route + ping              →  网关 / 丢包 / RTT / DNS
 ```
 
 这样不依赖设备上的 `awk`，也没有中间文件需要同步，屏幕上是刚测到的数据。
-`wifidiag.sh` 仍保留给命令行使用。
+（曾经有一套 `wifidiag.awk` + `jsonlib.awk` 的命令行管线，因 Android 的 awk 缺
+`strftime` 和数学函数，每加一个功能都要绕着这两个缺口改写，现已移除。）
 
 ### 界面
 
@@ -139,7 +140,7 @@ Magisk 同样适用（`cmd wifi` 需要 Android 10+）。
 
 ```sh
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh status'
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh wifi'          # 诊断（文本）
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'      # 国家码四层诊断
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh refresh'       # 探测 + 应用
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh set-cc JP'
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh cc-check'      # 国家码四层摘要
@@ -298,9 +299,6 @@ KsuFastSurfing/
     ├── customize.sh      安装期权限
     ├── diagnose.sh       四层信道诊断（只读）
     ├── probe.sh          本机 IP 探测（并发 + 超时）
-    ├── wifidiag.sh       诊断入口（命令行）
-    ├── wifidiag.awk      解析/分析/渲染（命令行文本）
-    ├── jsonlib.awk       JSON 转义（按字节，gawk/busybox 一致）
     ├── domains           待探测域名列表
     ├── hosts             合并产物（manager.sh build 生成）
     ├── user-hosts        手动条目（最高优先级）

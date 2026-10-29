@@ -17,7 +17,8 @@ const src = fs.readFileSync(path.join(ROOT, 'module/webroot/diag.js'), 'utf8');
 /* The module targets the browser (async helpers calling exec). Wrap it in a
    Function with exec injected so it can run in node without a DOM. */
 const api = new Function('exec', src + `
-  return { parseScan, parseLink, analyse, scoreChannels, chanOf, isDfs, uniiOf, quality };
+  return { parseScan, parseLink, analyse, scoreChannels, chanOf, isDfs, uniiOf,
+           quality, fillMacs, parseWpa, b64bytes };
 `)(async () => ({ stdout: '', stderr: '', errno: 0 }));
 
 let failures = 0;
@@ -219,5 +220,90 @@ console.log('== per-radio security ==');
   eq('mixed group radios', d.groups.find(g => g.ssid === 'Mixed').count, 2);
 }
 
-console.log(failures ? `\n${failures} failure(s)` : '\nall parser tests passed');
+
+/* ---------- 9. redacted BSSIDs and mangled SSIDs ---------- */
+console.log('== mac recovery ==');
+{
+  /* Android 12+ gives the page 68:19:**:**:37:c3 - the third and fourth octets
+     are the ones blanked, so a matching full address must read
+     68:19:xx:xx:37:c3. The complete address lives in wpa_supplicant, which the
+     page can read because it runs as root. */
+  const scan = HDR +
+    '  68:19:**:**:37:c3       5785    -58(0:-59/1:-63)    11.1    Li5DAA9D1D        [RSN-PSK][ESS]\n' +
+    '  68:19:**:**:37:c2       5785    -70(0:-71/1:-75)    11.1    Li7E641E1C        [RSN-PSK][ESS]\n' +
+    '  54:69:**:**:da:c0       2437    -69(0:-69/1:-83)    11.2    华科              [RSN-PSK][ESS]\n';
+
+  const rows = api.parseScan(scan);
+  eq('masked kept as-is before merge', rows[0].bssid, '68:19:**:**:37:c3');
+
+  /* Listed weakest-first, and the levels are inverted relative to the row
+     order, so proximity alone would hand each row the wrong address. */
+  const wpa = api.parseWpa('bssid / frequency / signal level / flags / ssid\n' +
+    '68:19:cc:dd:37:c2\t5785\t-70\t[RSN-PSK]\tLi7E641E1C\n' +
+    '68:19:aa:bb:37:c3\t5785\t-58\t[RSN-PSK]\tLi5DAA9D1D\n' +
+    '54:69:aa:bb:da:c0\t2437\t-69\t[RSN-PSK]\t华科\n');
+  eq('supplicant rows parsed', wpa.length, 3);
+
+  const fixed = api.fillMacs(rows, wpa);
+  eq('all masked resolved', fixed, 3);
+  eq('prefix+suffix pin', rows[0].bssid, '68:19:aa:bb:37:c3');
+  eq('sibling on same channel not crossed', rows[1].bssid, '68:19:cc:dd:37:c2');
+  eq('chinese name intact', rows[2].ssid, '华科');
+
+  /* Two radios on one channel under one vendor prefix, both at the same level,
+     and the supplicant lists them in the reverse of the page's order. Only the
+     octets that survived redaction can decide this. */
+  const dup = api.parseScan(HDR +
+    '  68:19:**:**:3b:21       5825    -60(0:-60/1:-87)  11.0  Li106B67FC  [RSN-PSK]\n' +
+    '  68:19:**:**:3b:20       5825    -60(0:-60/1:-87)  11.0  liC41CD1D9  [RSN-PSK]\n');
+  const dupWpa = api.parseWpa('h\n' +
+    '68:19:bb:cc:3b:20\t5825\t-60\t[RSN-PSK]\tliC41CD1D9\n' +
+    '68:19:aa:bb:3b:21\t5825\t-60\t[RSN-PSK]\tLi106B67FC\n');
+  api.fillMacs(dup, dupWpa);
+  eq('suffix pin disambiguates', dup.map(r => r.bssid),
+     ['68:19:aa:bb:3b:21', '68:19:bb:cc:3b:20']);
+  eq('no address reused', new Set(dup.map(r => r.bssid)).size, 2);
+
+  /* Nothing to merge: the redacted value must be left alone, never invented. */
+  const solo = api.parseScan(HDR +
+    '  68:19:**:**:37:c3       5785  -58  11.1  Solo  [RSN-PSK]\n');
+  eq('no supplicant leaves it masked', api.fillMacs(solo, []), 0);
+  eq('masked value unchanged', solo[0].bssid, '68:19:**:**:37:c3');
+}
+
+/* ---------- 10. SSID bytes survive the bridge ---------- */
+console.log('== ssid bytes ==');
+{
+  /* The WebUI bridge decodes as Latin-1, so a UTF-8 name arrived as mojibake:
+     only the first character looked right. Base64 + TextDecoder fixes it, and
+     the round trip has to be byte exact for CJK, emoji and emoji-in-CJK. */
+  const names = ['华科', '咖啡馆 5G', '🛜 home', 'Café', 'Li5DAA9D1D'];
+  names.forEach(n => {
+    const b = Buffer.from(n, 'utf8').toString('base64');
+    eq('round trip ' + n, api.b64bytes(b), n);
+  });
+  /* A lone truncated character would blow up a strict decode; it must degrade
+     to a replacement glyph instead of throwing and blanking the page. */
+  const broken = Buffer.from([0xe5, 0x8d, 0x8e, 0xe7, 0xa7]).toString('base64');
+  ok('truncated utf8 degrades', typeof api.b64bytes(broken) === 'string');
+  eq('decoded length sane', api.b64bytes('').length, 0);
+}
+
+/* ---------- 11. freshness ---------- */
+console.log('== freshness ==');
+{
+  const scan = HDR +
+    '  aa:00:00:00:00:01  5180  -50  2.0   A  [RSN-PSK]\n' +
+    '  aa:00:00:00:00:02  2437  -70  9.0   B  [RSN-PSK]\n' +
+    '  aa:00:00:00:00:03  5745  -60  300.0 C  [RSN-PSK]\n';
+  const d = api.analyse(api.parseScan(scan), {}, { gateway: '', loss: null, rtt: null, dns: 'ok' });
+  /* The median is what the UI shows: a 300-second neighbour must not drag the
+     whole cache "freshness" down to five minutes, which is why the max was
+     useless for telling whether a rescan landed. */
+  eq('age min', d.ageMin, 2);
+  eq('age median', d.ageMed, 9);
+  eq('age max still available', d.ageMax, 300);
+}
+
+console.log(failures ? `${failures} failure(s)` : '\nall parser tests passed');
 process.exit(failures ? 1 : 0);

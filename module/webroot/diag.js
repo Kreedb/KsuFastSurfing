@@ -22,6 +22,137 @@ async function sh(cmd) {
   return { out: (r.stdout || ''), err: (r.stderr || ''), code: r.errno };
 }
 
+/* Text whose bytes must survive intact.
+
+   SSIDs are arbitrary bytes, not a charset we get to assume: a Chinese or emoji
+   name goes through the WebUI bridge, the shell and the page, and any hop that
+   decodes as Latin-1 turns everything past the first multibyte character into
+   mojibake. Base64 is ASCII-only, so the bytes arrive exactly as the kernel
+   handed them to `cmd wifi` and are decoded once, here. */
+function b64bytes(s) {
+  const bin = atob(String(s || '').replace(/[\s=]+/g, ''));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  try { return new TextDecoder('utf-8', { fatal: false }).decode(out); }
+  catch (e) { return bin; }
+}
+
+async function shText(cmd) {
+  const r = await sh('(' + cmd + ') 2>&1 | base64');
+  const decoded = b64bytes(r.out);
+  if (decoded) return decoded;
+  /* No base64 on this image: fall back to the raw stream rather than showing
+     an empty page. Same data, just no byte guarantee. */
+  return r.out;
+}
+
+/* ---------- MAC recovery ----------
+   Android 12+ redacts the middle two octets of every BSSID in results returned
+   through the framework (`68:19:**:**:37:c3`) unless the caller holds location
+   access with the location toggle on. That is why the AP list showed asterisks
+   and why two radios under one SSID could not be told apart.
+
+   wpa_supplicant keeps the same scan results with the real addresses, and the
+   page runs as root, so its control interface is reachable. Its output is
+   tab-separated: bssid / frequency / signal / flags / ssid. When the ROM has no
+   wpa_cli the framework value is kept - never invented. */
+const MAC_CMDS = [
+  /* A cached scan is enough; if the supplicant has none, ask it to scan and
+     read again. Both are quiet on failure so the next command runs. */
+  'wpa_cli -i wlan0 scan_results',
+  'wpa_cli -i wlan0 scan_results 2>/dev/null | grep -q "^[0-9a-f]" || ' +
+    '{ wpa_cli -i wlan0 scan >/dev/null 2>&1; sleep 2; }; ' +
+    'wpa_cli -i wlan0 scan_results',
+  'for d in /data/vendor/wifi/wpa/sockets /data/misc/wifi/sockets ' +
+    '/data/vendor/wifi/sockets /data/vendor/wifi/hostapd/sockets; do ' +
+    'wpa_cli -p "$d" -i wlan0 scan_results 2>/dev/null && break; done',
+  'for d in /data/vendor/wifi/wpa/sockets /data/misc/wifi/sockets ' +
+    '/data/vendor/wifi/sockets; do ' +
+    'wpa_cli -p "$d" -i wlan0 scan >/dev/null 2>&1; sleep 2; ' +
+    'wpa_cli -p "$d" -i wlan0 scan_results 2>/dev/null && break; done'
+];
+
+function parseWpa(txt) {
+  const out = [];
+  (txt || '').split('\n').forEach(line => {
+    if (!line || /^bssid/i.test(line.trim())) return;
+    const p = line.split('\t');
+    if (p.length < 3) return;
+    const bssid = p[0].trim(), freq = +p[1], rssi = +p[2];
+    if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(bssid)) return;
+    const ssid = (p[4] || '').replace(/\s+$/, '');
+    out.push({ bssid, freq, rssi, ssid });
+  });
+  return out;
+}
+
+async function readRealMacs() {
+  for (const c of MAC_CMDS) {
+    const txt = await shText(c);
+    const rows = parseWpa(txt);
+    if (rows.length) return rows;
+  }
+  return [];
+}
+
+/* Fill a masked BSSID (and a truncated or garbled name) from the supplicant
+   table.
+
+   Pairing is by frequency and signal, choosing the nearest unmatched candidate.
+   Frequency alone is not enough - two radios on one channel under different
+   names are common - and the name is exactly what may be broken here, so it
+   cannot be the matching key. */
+function fillMacs(rows, real) {
+  if (!real.length) return 0;
+  const used = new Set();
+  let fixed = 0;
+
+  /* A redacted BSSID keeps its first two and last two octets: 68:19:**:**:37:c3
+     can only be 68:19:xx:xx:37:c3. That pin is essentially unique, so matching
+     on it alone is safe. RSSI proximity is only the tie-break when two radios
+     on one band share a vendor prefix. */
+  const fits = (masked, full) => {
+    const m = masked.split(':'), f = full.split(':');
+    if (m.length !== 6 || f.length !== 6) return false;
+    return m.every((x, i) => /\*/.test(x) || x.toLowerCase() === f[i].toLowerCase());
+  };
+
+  rows.forEach(a => {
+    if (!/\*/.test(a.bssid)) return;
+    let best = null, bestd = 1e9;
+    real.forEach((r, i) => {
+      if (used.has(i)) return;
+      if (r.freq !== a.freq) return;
+      if (!fits(a.bssid, r.bssid)) return;
+      const d = Math.abs(r.rssi - a.rssi);
+      if (d < bestd) { bestd = d; best = i; }
+    });
+    /* No address survived the prefix/suffix pin: fall back to the nearest radio
+       on the same channel. 6 dB of slack, because the framework reports link
+       RSSI while the supplicant averages its own level. */
+    if (best === null) {
+      real.forEach((r, i) => {
+        if (used.has(i) || r.freq !== a.freq) return;
+        const d = Math.abs(r.rssi - a.rssi);
+        if (d < bestd) { bestd = d; best = i; }
+      });
+      if (best !== null && bestd > 6) best = null;
+    }
+    if (best === null) return;
+    used.add(best);
+    const r = real[best];
+    a.bssid = r.bssid;
+    fixed++;
+    /* The framework pads and truncates the name column, and a cut can land
+       inside a multibyte character - which is exactly how a Chinese name ends
+       up as its first character plus a replacement glyph. The supplicant prints
+       the raw bytes, so prefer its copy whenever the two disagree. */
+    if (r.ssid && r.ssid !== a.ssid) a.ssid = r.ssid;
+    a.macSource = 'supplicant';
+  });
+  return fixed;
+}
+
 /* ---------- scan cache ----------
    Stock format, space aligned:
      BSSID  Frequency  RSSI(link:rssi0/rssi1)  Age(sec)  SSID  Flags
@@ -199,6 +330,7 @@ function quality(r) {
 function analyse(rows, link, net) {
   const n = rows.length;
   const count = (f) => rows.filter(f).length;
+  const ages = rows.map(a => a.age || 0).sort((a, b) => a - b);
   const dfsCh = [...new Set(rows.filter(a => a.dfs).map(a => a.ch))].sort((x, y) => x - y);
 
   /* Strongest BSSID per SSID for the AP table (hidden ones keep a slot). */
@@ -272,7 +404,14 @@ function analyse(rows, link, net) {
     },
     best: { rssi: best.rssi || 0, ssid: best.ssid || '', freq: best.freq || 0 },
     link: link || { ssid: '', freq: 0, ch: 0, rssi: 0, mbps: 0, std: '' },
-    ageMax: rows.reduce((m, a) => Math.max(m, a.age || 0), 0),
+    /* Freshness, three ways. The old value was the maximum age over all APs,
+       which is dominated by whichever neighbour the radio stopped hearing five
+       minutes ago - it barely moves after a rescan, so "did my scan do
+       anything" was unanswerable. The median describes the cache as a whole and
+       the minimum proves a scan actually landed. */
+    ageMax: ages[ages.length - 1] || 0,
+    ageMin: ages[0] || 0,
+    ageMed: ages.length ? ages[Math.floor(ages.length / 2)] : 0,
     dfsCh, aps, groups, congestion, roam, scores,
     verdict: {
       dfs: dfsVerdict, net: netVerdict,
@@ -284,13 +423,22 @@ function analyse(rows, link, net) {
 /* Collect everything. Each source independent so one failure is reported
    rather than blanking the page. */
 async function measure() {
-  const scan = await sh('cmd wifi list-scan-results 2>&1');
-  const link = await sh('cmd wifi status 2>&1');
+  /* Base64 in transit: see shText(). `cmd wifi` output is UTF-8 by contract,
+     but every hop in the WebUI bridge decodes as Latin-1, so a Chinese SSID
+     arrived as garbage. */
+  const scan = await shText('cmd wifi list-scan-results');
+  const link = await shText('cmd wifi status');
   const net = await collectNet();
 
-  const rows = parseScan(scan.out);
+  const rows = parseScan(scan);
   if (!rows.length) {
-    return { error: 'empty-scan', raw: scan.out, err: scan.err };
+    return { error: 'empty-scan', raw: scan, err: '' };
   }
-  return analyse(rows, parseLink(link.out), net);
+  const macs = await readRealMacs();
+  const fixed = fillMacs(rows, macs);
+
+  const d = analyse(rows, parseLink(link), net);
+  d.macFixed = fixed;
+  d.macTotal = rows.filter(a => /\*/.test(a.bssid)).length;
+  return d;
 }

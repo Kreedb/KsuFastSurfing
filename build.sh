@@ -9,12 +9,6 @@ MOD="$ROOT/module"
 DIST="$ROOT/dist"
 
 [ -f "$MOD/module.prop" ] || { echo "error: module/module.prop not found" >&2; exit 1; }
-# The diagnostic pipeline is awk, not sh: if these are missing the module still
-# installs but every scan silently fails, so fail the build instead.
-for f in wifidiag.awk jsonlib.awk; do
-  [ -f "$MOD/$f" ] || { echo "error: module/$f not found" >&2; exit 1; }
-done
-
 ID=$(sed -n 's/^id=//p'          "$MOD/module.prop" | tail -1)
 VER=$(sed -n 's/^version=//p'    "$MOD/module.prop" | tail -1)
 [ -n "$ID" ] && [ -n "$VER" ] || { echo "error: id/version missing in module.prop" >&2; exit 1; }
@@ -52,7 +46,7 @@ src, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 # Executables must keep 0755; data files must be 0644.
 EXEC = {
     "post-fs-data.sh", "service.sh", "action.sh",
-    "uninstall.sh", "customize.sh", "manager.sh", "diagnose.sh", "probe.sh", "wifidiag.sh",
+    "uninstall.sh", "customize.sh", "manager.sh", "diagnose.sh", "probe.sh",
 }
 # Runtime artifacts never ship.
 SKIP = {"manager.log", "mount.log", "service.log"}

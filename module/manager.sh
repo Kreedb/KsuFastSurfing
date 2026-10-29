@@ -239,17 +239,13 @@ case "$1" in
     ;;
   status)    cmd_status ;;
   regdom)    cmd_apply_regdom ;;
+  # Two read-only reports, and nothing else: `diagnose` walks the four layers
+  # that decide which channels exist, `cc-check` counts what is actually on air.
+  # The per-AP analysis lives in the WebUI, which parses the same interfaces in
+  # the page (see webroot/diag.js). The awk pipeline behind the old `wifi`
+  # subcommands is gone: Android's awk has no strftime and no math functions, so
+  # every feature had to be written around those gaps.
   diagnose)  sh "$MODDIR/diagnose.sh" ;;
-  # Command-line diagnostics. The WebUI no longer uses these: it reads the raw
-  # interfaces itself (see webroot/diag.js), which keeps it honest and removes
-  # the awk-on-device dependency entirely. These stay for shell users and for
-  # `wifi-json-file`, the formatted data file other scripts can consume.
-  wifi)      sh "$MODDIR/wifidiag.sh" ${2:-scan} ;;
-  wifi-json) sh "$MODDIR/wifidiag.sh" ${2:-json} ;;
-  wifi-json-file)
-             # Print the path of the formatted JSON file, rebuilding it if stale.
-             sh "$MODDIR/wifidiag.sh" rebuild ;;
-  wifi-api)  sh "$MODDIR/wifidiag.sh" api ;;
   cc-check)
     printf 'framework=%s\n' "$(cc_current)"
     sr=$(cmd wifi list-scan-results 2>&1)
@@ -275,5 +271,5 @@ case "$1" in
     printf 'config=%s\n' "$(conf_get CC US)"
     printf 'kernel=%s\n' "$( [ -r /sys/module/cfg80211/parameters/ieee80211_regdom ] && cat /sys/module/cfg80211/parameters/ieee80211_regdom || echo unknown )"
     ;;
-  *) echo "usage: manager.sh {probe|refresh|apply|status|set-cc XX|regdom|wifi|wifi-json|wifi-json-file|wifi-api|diagnose|cc-check|build|remount}"; exit 2 ;;
+  *) echo "usage: manager.sh {probe|refresh|apply|status|set-cc XX|regdom|diagnose|cc-check|build|remount}"; exit 2 ;;
 esac
