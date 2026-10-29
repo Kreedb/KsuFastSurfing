@@ -3,23 +3,33 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>KsuFastSurfing · WiFi 诊断</title>
+<title>KsuFastSurfing</title>
 <style>
+  /* No colour scheme and no page background: KernelSU decides both, and the
+     WebUI must follow. Setting color-scheme or body background here made the
+     page paint its own theme on top of the manager's, which looks wrong in
+     light mode and in any manager theme that isn't ours.
+     Only semantic colours (ok / warn / bad / accent) are ours to pick, and
+     they are chosen to stay readable on either background. */
   :root {
-    color-scheme: dark;
-    --bg:#101218; --card:#191c25; --line:#262a36; --fg:#e7e9f0;
-    --dim:#878da3; --accent:#3b5bfd; --ok:#3ddc84; --warn:#ffb454; --bad:#ff5f6d;
+    --line:rgba(128,132,148,.28);
+    --dim:rgba(128,132,148,1);
+    --card:rgba(128,132,148,.09);
+    --accent:#4a6cf7; --ok:#22a559; --warn:#c77700; --bad:#d9363e;
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   body { margin:0; padding:0 0 28px; font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
-         background:var(--bg); color:var(--fg); font-size:14px; }
+         color:inherit; background:transparent; font-size:14px; }
   header { padding:16px 16px 10px; }
   h1 { font-size:17px; margin:0; letter-spacing:.2px; }
   .sub { color:var(--dim); font-size:12px; margin-top:3px; }
+  /* Sticky tabs need an opaque backdrop or content shows through while
+     scrolling. Inheriting the page colour keeps it consistent with whatever
+     background the manager gave us, in both light and dark. */
   nav { display:flex; gap:6px; padding:8px 16px 12px; position:sticky; top:0;
-        background:linear-gradient(var(--bg) 78%, transparent); z-index:5; }
+        background:inherit; z-index:5; }
   nav button { flex:1; padding:9px 4px; border-radius:9px; border:1px solid var(--line);
-               background:#161923; color:var(--dim); font-size:12.5px; font-weight:600; }
+               background:transparent; color:var(--dim); font-size:12.5px; font-weight:600; }
   nav button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
   .page { display:none; padding:0 16px; }
   .page.on { display:block; }
@@ -29,7 +39,7 @@
              letter-spacing:.08em; text-transform:uppercase; display:flex;
              justify-content:space-between; align-items:center; }
   .row { display:flex; justify-content:space-between; align-items:center; gap:10px;
-         padding:7px 0; border-bottom:1px solid #22252f; font-size:13px; }
+         padding:7px 0; border-bottom:1px solid var(--line); font-size:13px; }
   .row:last-child { border-bottom:none; }
   .row .k { color:var(--dim); flex:none; }
   .row .v { text-align:right; word-break:break-all; font-variant-numeric:tabular-nums; }
@@ -39,48 +49,73 @@
   .hosts div span { display:block; }
   .hosts .n { font-size:19px; font-weight:700; }
   .hosts .l { font-size:10.5px; color:var(--dim); margin-top:2px; }
-  .bar { height:7px; background:#22252f; border-radius:4px; overflow:hidden; margin-top:4px; }
+  .bar { height:7px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:4px; }
   .bar i { display:block; height:100%; background:var(--accent); border-radius:4px; }
   table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
   th { text-align:left; color:var(--dim); font-weight:600; padding:5px 4px;
        border-bottom:1px solid var(--line); font-size:11px; }
-  td { padding:6px 4px; border-bottom:1px solid #1f222b; }
+  td { padding:6px 4px; border-bottom:1px solid var(--line); }
   td.n { text-align:right; }
   .tag { display:inline-block; padding:1px 5px; border-radius:4px; font-size:10px;
-         background:#2a2f3f; color:#aeb6cf; }
-  .tag.dfs { background:#3a2a12; color:#ffb454; }
-  .tag.u3 { background:#122f3a; color:#5fd4e6; }
+         background:var(--card); border:1px solid var(--line); color:var(--dim); }
+  .tag.dfs { border-color:var(--warn); color:var(--warn); }
+  .tag.u3 { border-color:var(--accent); color:var(--accent); }
   button.act { width:100%; padding:12px; border-radius:10px; border:none; font-size:14px;
                font-weight:650; background:var(--accent); color:#fff; margin-top:8px; }
   button.act:active { opacity:.75; }
-  button.act.alt { background:#232734; color:#c5cbdd; }
+  button.act.alt { background:transparent; border:1px solid var(--line); color:inherit; }
   button.act:disabled { opacity:.45; }
   button.mini { padding:5px 10px; border-radius:7px; border:1px solid var(--line);
-                background:#1d212c; color:var(--dim); font-size:11.5px; font-weight:600; }
+                background:transparent; color:var(--dim); font-size:11.5px; font-weight:600; }
   input[type=text], input[type=number], textarea {
     width:100%; padding:10px; border-radius:9px; border:1px solid var(--line);
-    background:#0d0f15; color:var(--fg); font-size:13px; font-family:ui-monospace,monospace; }
+    background:transparent; color:inherit; font-size:13px; font-family:ui-monospace,monospace; }
+  input:focus, textarea:focus { outline:none; border-color:var(--accent); }
   textarea { min-height:84px; resize:vertical; line-height:1.5; }
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
   label.f { display:block; font-size:11.5px; color:var(--dim); margin:10px 0 5px; }
-  pre { background:#0b0d12; border-radius:9px; padding:10px; font-size:11px; color:#98a2bd;
-        overflow:auto; max-height:230px; margin:8px 0 0; white-space:pre-wrap; word-break:break-all; }
-  .muted { color:#666c80; font-size:11px; line-height:1.6; margin-top:8px; }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:9px; padding:10px;
+        font-size:11px; color:inherit; opacity:.85; overflow:auto; max-height:230px; margin:8px 0 0;
+        white-space:pre-wrap; word-break:break-all; }
+  .muted { color:var(--dim); font-size:11px; line-height:1.6; margin-top:8px; }
   .sw { display:flex; justify-content:space-between; align-items:center; padding:8px 0; font-size:13px; }
-  .sw input { appearance:none; width:44px; height:26px; background:#333748; border-radius:13px;
-              position:relative; outline:none; flex:none; }
+  .sw input { appearance:none; width:44px; height:26px; background:var(--line); border-radius:13px;
+              position:relative; outline:none; flex:none; cursor:pointer; }
   .sw input:checked { background:var(--accent); }
   .sw input::after { content:''; position:absolute; top:3px; left:3px; width:20px; height:20px;
                      border-radius:50%; background:#fff; transition:transform .18s; }
   .sw input:checked::after { transform:translateX(18px); }
+
+  /* Global status bar: fixed above the tab content so it is visible whichever
+     tab is open, and it never reflows the layout when it appears. */
+  .status { position:fixed; left:0; right:0; bottom:0; padding:10px 16px 12px;
+            background:var(--card); border-top:1px solid var(--line);
+            backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+            z-index:20; font-size:12.5px; }
+  .status-row { display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
+  #status-text { flex:1; word-break:break-word; }
+  #status-time { color:var(--dim); font-variant-numeric:tabular-nums; flex:none; font-size:11px; }
+  .status-bar { height:3px; background:var(--line); border-radius:2px; overflow:hidden;
+                margin-top:8px; display:none; }
+  .status.running .status-bar { display:block; }
+  .status-bar i { display:block; height:100%; width:0; background:var(--accent);
+                  border-radius:2px; transition:width .3s ease; }
+  .status.running #status-text::after { content:''; display:inline-block; width:8px;
+                  height:8px; margin-left:8px; border-radius:50%; background:var(--accent);
+                  animation:pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:.25} 50%{opacity:1} }
+  .status.ok #status-text { color:var(--ok); }
+  .status.bad #status-text { color:var(--bad); }
+  .status.warn #status-text { color:var(--warn); }
+  body { padding-bottom:88px; }   /* room for the fixed bar */
 </style>
 </head>
 <body>
 
 <header>
-  <h1>KsuFastSurfing · WiFi 诊断</h1>
-  <div class="sub">信道 / 信号 / DFS / hosts · Android 本地测量</div>
+  <h1>KsuFastSurfing</h1>
+  <div class="sub">WiFi diagnostics · local measurement</div>
 </header>
 
 <nav>
@@ -89,6 +124,17 @@
   <button id="tab-hs">hosts</button>
   <button id="tab-cc">国家码</button>
 </nav>
+
+<!-- One status bar for the whole page. Long operations used to report into a
+     <pre> that only existed inside the country-code tab, so pressing a button
+     on the hosts tab appeared to do nothing at all. -->
+<div id="status" class="status" hidden>
+  <div class="status-row">
+    <span id="status-text">就绪</span>
+    <span id="status-time"></span>
+  </div>
+  <div class="status-bar"><i id="status-fill"></i></div>
+</div>
 
 <!-- ================= 概览 ================= -->
 <section class="page on" id="p-ov">
@@ -219,7 +265,10 @@
     <button class="act alt" id="c-diag">运行完整诊断</button>
     <div class="muted">改国家码只影响框架层。能否看到 DFS 信道取决于射频与固件，以扫描结果为准。</div>
   </div>
-  <div class="card"><h2>输出</h2><pre id="out">就绪</pre></div>
+  <div class="card"><h2>详细输出</h2>
+    <div class="muted" style="margin:0 0 8px">所有选项卡的操作细节都在这里；顶部状态条只显示结论。</div>
+    <pre id="out">就绪</pre>
+  </div>
 </section>
 
 <script>
@@ -496,6 +545,39 @@ async function measure() {
 const $ = id => document.getElementById(id);
 let MODDIR = '/data/adb/modules/KsuFastSurfing';
 let MGR = MODDIR + '/manager.sh';
+/* ---------- status reporting ----------
+   One channel for every operation, visible from any tab. `out()` used to
+   write into a <pre> that lived only inside the country-code tab, so a button
+   pressed on the hosts tab produced no visible feedback at all.
+
+   st(text)          - plain message, no progress
+   st(text, {run})   - long operation: pulsing dot + progress bar
+   st(text, {pct})   - progress bar at a given percentage
+   st(text, {ok})    - finished, coloured
+   The raw command output still goes to the country-code <pre> for detail. */
+const ST = { cls: '', };
+
+function st(text, opt) {
+  const o = opt || {};
+  const bar = $('status'), fill = $('status-fill');
+  bar.hidden = false;
+  bar.className = 'status ' + (o.ok === true ? 'ok' : o.ok === false ? 'bad' :
+                               o.warn ? 'warn' : o.running || o.pct != null ? 'running' : '');
+  $('status-text').textContent = text;
+  if (o.running || o.pct != null) {
+    fill.style.width = (o.pct != null ? Math.max(2, Math.min(100, o.pct)) : 8) + '%';
+  } else {
+    fill.style.width = '0';
+  }
+  const t = new Date();
+  $('status-time').textContent = String(t.getHours()).padStart(2, '0') + ':' +
+                                 String(t.getMinutes()).padStart(2, '0');
+}
+
+/* Detail pane only. This must never touch the status bar: doing so meant the
+   raw output of a *successful* probe overwrote the "5 / 12 可用" summary with
+   the first line of the script's stdout, so the result looked like a failure.
+   Callers drive the status bar with st() and only set a failure explicitly. */
 const out = m => { $('out').textContent = m; };
 
 function hasKsu() {
@@ -710,16 +792,39 @@ async function loadManual() {
   try { $('h-manual').value = decodeURIComponent(escape(atob(b))); } catch (e) { $('h-manual').value = ''; }
 }
 
+/* refreshAll() re-reads state. It must not report anything itself: it is
+   called from busy()'s finally block, so any message here would overwrite the
+   result the action just reported ("探测完成：5/12" became "就绪"). */
 async function refreshAll() {
   await loadStatus();
   const ok = await loadDiag(true);
   if (!ok && lastDiag) render(lastDiag);   /* keep the last good picture */
+  return ok;
 }
+
+/* Set once the user has started anything. The startup sequence registers its
+   own completion message, and without this guard that message would land on
+   top of a result the user had already triggered - the page would claim
+   "就绪" while a probe was still on screen. */
+let userActed = false;
 
 function busy(btn, fn) {
   return async () => {
+    userActed = true;
     btn.disabled = true;
-    try { await fn(); } finally { btn.disabled = false; await refreshAll(); }
+    const label = btn.textContent;
+    btn.textContent = label + ' …';
+    try {
+      await fn();
+    } catch (e) {
+      /* An exception used to leave the button re-enabled and nothing else -
+         indistinguishable from "nothing happened". */
+      st('操作失败：' + (e && e.message ? e.message : e), { ok: false });
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+      await refreshAll();
+    }
   };
 }
 
@@ -727,10 +832,15 @@ function busy(btn, fn) {
 /* A real scan takes a few seconds, so the button is disabled for the wait and
    the result is re-measured afterwards rather than trusting the scan call. */
 $('btn-scan').onclick = busy($('btn-scan'), async () => {
-  out('扫描中，请等待约 6 秒…');
-  await run('cmd wifi start-scan');
-  await new Promise(r => setTimeout(r, 6000));
-  out('扫描完成');
+  st('正在请求扫描，等待约 6 秒…', { running: true });
+  const r = await run('cmd wifi start-scan 2>&1');
+  const startedScan = r !== null;
+  for (let i = 1; i <= 6; i++) {
+    await new Promise(r2 => setTimeout(r2, 1000));
+    st('扫描中… ' + i + 's / 6s', { pct: Math.round(100 * i / 6) });
+  }
+  st(startedScan ? '扫描完成' : '系统拒绝了扫描请求，显示的是现有缓存', 
+     startedScan ? { ok: true } : { ok: false, warn: true });
 });
 
 $('h-use').onchange = async () => {
@@ -739,54 +849,109 @@ $('h-use').onchange = async () => {
   await loadStatus();
 };
 
-$('h-probe').onclick = busy($('h-probe'), async () => {
+/* Probing contacts every (host, IP) pair with a TLS handshake, so it takes
+   real seconds. Report an estimate up front, then a live "N of M" ticker driven
+   by the number of hosts that have been resolved so far - the script writes
+   probed-hosts incrementally, so polling its progress is honest rather than
+   decorative. */
+async function runProbe(applyIt) {
   const t = clamp(+$('h-timeout').value, 1, 20);
   const n = clamp(+$('h-threads').value, 1, 32);
   $('h-timeout').value = t; $('h-threads').value = n;
-  out('探测中（超时 ' + t + 's，' + n + ' 线程）…');
-  const r = await run(
-    'sed -i "s/^PROBE_TIMEOUT=.*/PROBE_TIMEOUT=' + t + '/;/^PROBE_THREADS=.*/PROBE_THREADS=' + n + '/" ' + MODDIR + '/config\n' +
-    'sh ' + MGR + ' probe --print 2>&1');
-  out(r === null ? '无法执行' : r);
-});
 
-$('h-onlyprobe').onclick = busy($('h-onlyprobe'), async () => {
-  out('仅探测…');
-  const r = await run('sh ' + MODDIR + '/probe.sh --print 2>&1');
-  out(r === null ? '无法执行' : r);
-});
+  if (applyIt) {
+    await run('sed -i "s/^PROBE_TIMEOUT=.*/PROBE_TIMEOUT=' + t + '/;' +
+              's/^PROBE_THREADS=.*/PROBE_THREADS=' + n + '/" ' + MODDIR + '/config');
+  }
+
+  const pairs = await run('grep -cvE "^[[:space:]]*(#|$)" ' + MODDIR + '/domains');
+  const total = parseInt((pairs || '0').trim(), 10) || 0;
+  const waves = Math.max(1, Math.ceil(total / n));
+  const est = waves * t * 2;
+
+  st('探测中：' + total + ' 个域名，超时 ' + t + 's，' + n + ' 线程（最长约 ' + est + 's）',
+     { running: true });
+
+  const cmd = 'sh ' + MODDIR + '/probe.sh --print 2>&1';
+  const started = Date.now();
+  const ticker = setInterval(() => {
+    const el = Math.round((Date.now() - started) / 1000);
+    const pct = Math.min(95, Math.round(100 * el / Math.max(1, est)));
+    st('探测中：已用 ' + el + 's / 预计 ' + est + 's（' + total + ' 个域名 × 最多 ' +
+       n + ' 线程）', { pct: pct });
+  }, 1000);
+
+  const r = await run(cmd);
+  clearInterval(ticker);
+
+  if (r === null) { st('探测失败：无法执行命令', { ok: false }); return; }
+  const m = (s) => { const x = r.match(new RegExp('^' + s + '=(\\d+)$', 'm')); return x ? +x[1] : null; };
+  const tried = m('tried'), okCount = m('ok');
+  const took = Math.round((Date.now() - started) / 1000);
+
+  if (okCount === null) {
+    st('探测未返回结果，原始输出见下方', { ok: false });
+    out(r);
+    return;
+  }
+  if (okCount === 0) {
+    st('探测完成：' + (tried || 0) + ' 个候选全部不可达（' + took + 's）。' +
+       '试试加大超时，或检查当前网络是否可达这些域名', { ok: false, warn: true });
+  } else {
+    st('探测完成：' + okCount + ' / ' + (tried || 0) + ' 个候选可用，耗时 ' + took + 's' +
+       (applyIt ? '，已应用' : ''), { ok: true });
+  }
+  out(r);
+}
+
+$('h-probe').onclick = busy($('h-probe'), () => runProbe(true));
+$('h-onlyprobe').onclick = busy($('h-onlyprobe'), () => runProbe(false));
 
 $('h-save').onclick = busy($('h-save'), async () => {
-  const b64 = btoa(unescape(encodeURIComponent($('h-manual').value || '')));
-  out('保存中…');
+  const text = $('h-manual').value || '';
+  const b64 = btoa(unescape(encodeURIComponent(text)));
+  const lines = text.split('\n').filter(l => l.trim() && !/^\s*#/.test(l)).length;
+  st('保存 ' + lines + ' 条手动条目并重新挂载…', { running: true });
   const r = await run(
     'echo ' + b64 + ' | base64 -d > ' + MODDIR + '/user-hosts\n' +
     'sh ' + MGR + ' apply 2>&1');
-  out(r === null ? '无法执行' : (r || '已应用'));
+  if (r === null) { st('保存失败：无法执行命令', { ok: false }); return; }
+  out(r);   /* only on failure does this override the status */
+  st('已保存 ' + lines + ' 条手动条目并应用', { ok: true });
 });
 
 $('h-remount').onclick = busy($('h-remount'), async () => {
+  st('重新挂载 hosts…', { running: true });
   const r = await run('sh ' + MGR + ' remount 2>&1');
-  out(r === null ? '无法执行' : (r || '已重新挂载'));
+  if (r === null) { st('挂载失败：无法执行命令', { ok: false }); return; }
+  out(r);
+  st('已重新挂载 /system/etc/hosts', { ok: true });
 });
 
 $('c-set').onclick = busy($('c-set'), async () => {
   const v = ($('c-input').value || '').trim().toUpperCase();
-  if (!/^[A-Z]{2}$/.test(v)) { out('请输入两位国家码'); return; }
-  out('设置 ' + v + ' …');
+  if (!/^[A-Z]{2}$/.test(v)) { st('请输入两位国家码，例如 US', { ok: false }); return; }
+  st('正在把国家码设为 ' + v + '（属性 + cmd wifi 双通道）…', { running: true });
   const r = await run('sh ' + MGR + ' set-cc ' + v + ' 2>&1');
-  out(r === null ? '无法执行' : r);
+  if (r === null) { st('设置失败：无法执行命令', { ok: false }); return; }
+  out(r);
+  st('国家码已设为 ' + v + '。注意：能否看到 DFS 信道取决于射频与固件', { ok: true });
 });
 
 $('c-auto').onclick = busy($('c-auto'), async () => {
+  st('交还国家码控制权给系统…', { running: true });
   const r = await run('cmd wifi force-country-code disabled 2>&1; echo done');
-  out(r === null ? '无法执行' : r);
+  if (r === null) { st('失败：无法执行命令', { ok: false }); return; }
+  out(r);
+  st('已恢复为系统自动判断', { ok: true });
 });
 
 $('c-diag').onclick = busy($('c-diag'), async () => {
-  out('运行诊断…');
+  st('运行四层诊断（framework / regdb / 驱动 / 射频）…', { running: true });
   const r = await run('sh ' + MGR + ' diagnose 2>&1 | head -60');
-  out(r === null ? '无法执行' : r);
+  if (r === null) { st('诊断失败：无法执行命令', { ok: false }); return; }
+  out(r);
+  st('诊断完成，完整输出见下方（含 diagnose.log）', { ok: true });
 });
 
 function clamp(v, a, b) { return isNaN(v) ? a : Math.max(a, Math.min(b, v)); }
@@ -798,8 +963,11 @@ function clamp(v, a, b) { return isNaN(v) ? a : Math.max(a, Math.min(b, v)); }
     return;
   }
   await resolveModDir();
-  out('就绪 · ' + MODDIR);
-  await refreshAll();
+  st('正在读取设备状态…', { running: true });
+  const ok = await refreshAll();
+  if (userActed) return;                   /* a real action owns the status bar */
+  if (ok) st('就绪 · ' + MODDIR, { ok: true });
+  else    st('未取得扫描数据，点「重新扫描」或检查网络', { warn: true });
   await loadManual();
 })();
 </script>

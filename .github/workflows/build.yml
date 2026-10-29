@@ -64,6 +64,12 @@ jobs:
           # between `cmd wifi` and every number on screen.
           node tests/test-diag.js
 
+      - name: Verify WebUI status feedback
+        run: |
+          # Every action must report somewhere the user can see, from any tab,
+          # and the result must not be overwritten by the refresh that follows.
+          node tests/test-status.js
+
       - name: Verify index.html is self-contained
         run: |
           # The WebView loads this from an internal path where <script src>

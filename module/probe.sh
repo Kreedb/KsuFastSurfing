@@ -97,7 +97,12 @@ for h in $LIST; do
 done
 total=$(wc -l < "$TMPD/queue" | tr -d ' ')
 log "pairs=$total timeout=${TIMEOUT}s threads=$THREADS"
+# Timing matters to the caller: with N pairs and T threads the worst case is
+# ceil(N/T) * (TIMEOUT*2) seconds, and the UI shows that as an estimate rather
+# than leaving the user staring at a dead button.
 echo "pairs=$total"
+echo "timeout=$TIMEOUT"
+echo "threads=$THREADS"
 
 run_pool() {
   i=0
@@ -131,7 +136,10 @@ fi
 } > "$OUT"
 
 ok=$(grep -c '^[0-9]' "$OUT" 2>/dev/null || echo 0)
-log "resolved $ok host(s)"
+tried=$(wc -l < "$TMPD/queue" 2>/dev/null | tr -d ' ')
+[ -n "$tried" ] || tried=0
+log "resolved $ok host(s) of $tried candidate(s)"
+echo "tried=$tried"
 echo "ok=$ok"
 if [ "$PRINT" = "1" ]; then
   echo "--- best ---"
