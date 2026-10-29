@@ -1,0 +1,11 @@
+# build output
+dist/
+
+# runtime artifacts the module writes on device
+*.log
+.seen*
+.hosts.*
+
+# editor / OS noise
+.DS_Store
+*.swp

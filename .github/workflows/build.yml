@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint shell scripts (busybox ash, as on Android)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq busybox-static
+          fail=0
+          for f in module/*.sh build.sh; do
+            busybox ash -n "$f" || { echo "::error file=$f::syntax error"; fail=1; }
+          done
+          exit $fail
+
+      - name: Validate module.prop
+        run: |
+          id=$(sed -n 's/^id=//p' module/module.prop | tail -1)
+          case "$id" in
+            [A-Za-z]*) ;;
+            *) echo "::error::module id must start with a letter"; exit 1 ;;
+          esac
+          for k in id name version versionCode author description; do
+            grep -q "^$k=" module/module.prop || { echo "::error::missing $k"; exit 1; }
+          done
+
+      - name: Build zip
+        run: ./build.sh
+
+      - name: Check merged hosts
+        run: |
+          cp -r module /tmp/m
+          sh /tmp/m/manager.sh build
+          dup=$(awk '/^[0-9]/{print $2}' /tmp/m/hosts | sort | uniq -d)
+          [ -z "$dup" ] || { echo "::error::duplicate hosts entries: $dup"; exit 1; }
+          grep -q '^# --- ' /tmp/m/hosts || { echo "::error::no layers"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: dist/*.zip
+
+      - name: Release on tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip

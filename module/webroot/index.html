@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GCM / GitHub Hosts</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#12131a; --card:#1b1d27; --line:#272a37; --fg:#e6e8f0;
+    --dim:#8b90a3; --accent:#3b5bfd; --ok:#3ddc84; --bad:#ff6b6b;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:16px 16px 32px; font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--fg); }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:12px; margin-bottom:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:14px; margin-bottom:12px; }
+  .card h2 { font-size:12px; margin:0 0 10px; color:var(--dim); font-weight:600;
+             letter-spacing:.06em; text-transform:uppercase; }
+  .row { display:flex; justify-content:space-between; align-items:center;
+         padding:7px 0; border-bottom:1px solid #23262f; font-size:13px; gap:10px; }
+  .row:last-child { border-bottom:none; }
+  .row .k { color:var(--dim); flex:none; }
+  .row .v { text-align:right; word-break:break-all; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .dimv { color:var(--dim); }
+  button { width:100%; padding:12px; border-radius:10px; border:none; font-size:14px;
+           font-weight:600; background:var(--accent); color:#fff; margin-top:8px; }
+  button:active { opacity:.75; }
+  button.alt { background:#2a2e3d; color:#c9cede; }
+  button:disabled { opacity:.45; }
+  input[type=text] { width:100%; padding:10px; border-radius:9px; border:1px solid var(--line);
+                     background:#0e0f15; color:var(--fg); font-size:13px; font-family:monospace; }
+  textarea { width:100%; min-height:96px; padding:10px; border-radius:9px; border:1px solid var(--line);
+             background:#0e0f15; color:var(--fg); font-size:12px; font-family:monospace;
+             resize:vertical; line-height:1.5; }
+  label.sw { display:flex; justify-content:space-between; align-items:center; padding:7px 0;
+             font-size:13px; cursor:pointer; }
+  label.sw input { width:44px; height:26px; appearance:none; background:#333748; border-radius:13px;
+                   position:relative; outline:none; cursor:pointer; flex:none; }
+  label.sw input:checked { background:var(--accent); }
+  label.sw input::after { content:''; position:absolute; top:3px; left:3px; width:20px; height:20px;
+                          border-radius:50%; background:#fff; transition:transform .18s; }
+  label.sw input:checked::after { transform:translateX(18px); }
+  pre { background:#0e0f15; border-radius:8px; padding:10px; font-size:11px; overflow:auto;
+        max-height:200px; color:#9fa8c4; margin:8px 0 0; white-space:pre-wrap; word-break:break-all; }
+  .muted { color:#6b7085; font-size:11px; margin-top:8px; line-height:1.6; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+</style>
+</head>
+<body>
+<h1>GCM / GitHub Hosts</h1>
+<div class="sub">KernelSU · 云端合并 · WiFi US</div>
+
+<div class="card">
+  <h2>状态</h2>
+  <div class="row"><span class="k">mtalk 加速</span><span class="v" id="s-mtalk">—</span></div>
+  <div class="row"><span class="k">GitHub 加速</span><span class="v" id="s-github">—</span></div>
+  <div class="row"><span class="k">手动条目</span><span class="v" id="s-user">—</span></div>
+  <div class="row"><span class="k">/system/etc/hosts</span><span class="v" id="s-mount">—</span></div>
+  <div class="row"><span class="k">国家码 (配置)</span><span class="v" id="s-cc">—</span></div>
+  <div class="row"><span class="k">国家码 (当前)</span><span class="v" id="s-curcc">—</span></div>
+</div>
+
+<div class="card">
+  <h2>云端来源</h2>
+  <label class="sw"><span>mtalk / FCM 加速</span><input type="checkbox" id="t-mtalk"></label>
+  <label class="sw"><span>GitHub 加速</span><input type="checkbox" id="t-github"></label>
+  <button id="btn-refresh">从云端刷新</button>
+  <div class="muted">源：yangFenTuoZi/fcm-hosts、maxiaof/github-hosts</div>
+</div>
+
+<div class="card">
+  <h2>WiFi 国家码</h2>
+  <input type="text" id="cc-input" placeholder="US" maxlength="2" autocapitalize="characters">
+  <div class="grid2">
+    <button id="btn-cc">应用国家码</button>
+    <button id="btn-cc-default" class="alt">恢复自动</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>手动 hosts 条目</h2>
+  <textarea id="user-hosts" placeholder="1.2.3.4  example.com
+5.6.7.8  another.host"></textarea>
+  <button id="btn-save-user">保存并应用</button>
+  <div class="muted">手动条目优先级最高，会覆盖云端同名域名。</div>
+</div>
+
+<button id="btn-apply" class="alt">应用配置并重挂</button>
+
+<div class="card" style="margin-top:12px">
+  <h2>输出</h2>
+  <pre id="out">就绪</pre>
+</div>
+
+<div class="muted">hosts 在 post-fs-data 阶段绑定挂载；云端刷新在开机后异步执行，失败自动回退本地缓存。</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const MODDIR = '/data/adb/modules/gcm-hosts-us';
+const MGR = MODDIR + '/manager.sh';
+const out = m => { $('out').textContent = m; };
+
+let execFn = null;
+async function getExec() {
+  if (execFn) return execFn;
+  try {
+    const m = await import('kernelsu');
+    execFn = m.exec;
+  } catch (e) {
+    out('未检测到 KernelSU WebUI 环境：' + e);
+  }
+  return execFn;
+}
+
+async function run(cmd) {
+  const exec = await getExec();
+  if (!exec) return null;
+  const r = await exec(cmd, { cwd: '/' });
+  return (r.stdout || '') + (r.stderr || '');
+}
+
+function setOk(el, ok, text) {
+  el.textContent = text;
+  el.className = 'v ' + (ok ? 'ok' : 'bad');
+}
+
+async function refresh() {
+  const r = await run(MGR + ' status');
+  if (r === null) return;
+  const m = {};
+  r.split('\n').forEach(l => {
+    const i = l.indexOf('=');
+    if (i > 0) m[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+  });
+  setOk($('s-mtalk'), +m.mtalk > 0, (m.mtalk || 0) + ' 条');
+  setOk($('s-github'), +m.github > 0, (m.github || 0) + ' 条');
+  setOk($('s-user'), true, (m.user || 0) + ' 条');
+  setOk($('s-mount'), m.mounted === '1', m.mounted === '1' ? '已挂载' : '未挂载');
+  setOk($('s-cc'), true, m.cc || 'US');
+  const cur = m.cur_cc || '';
+  setOk($('s-curcc'), cur.toUpperCase() === (m.cc || 'US').toUpperCase(), cur || '未获取');
+
+  $('t-mtalk').checked = m.use_mtalk !== '0';
+  $('t-github').checked = m.use_github !== '0';
+  $('cc-input').value = m.cc || 'US';
+}
+
+async function loadUserHosts() {
+  const r = await run('base64 -w0 ' + MODDIR + '/user-hosts 2>/dev/null');
+  if (!r) return;
+  const b64 = r.trim().split('\n').pop();
+  if (!b64) return;
+  try {
+    $('user-hosts').value = decodeURIComponent(escape(atob(b64)));
+  } catch (e) {
+    $('user-hosts').value = '';
+  }
+}
+
+async function busy(btn, fn) {
+  btn.disabled = true;
+  try { await fn(); } finally { btn.disabled = false; await refresh(); }
+}
+
+$('btn-refresh').onclick = e => busy(e.target, async () => {
+  out('正在从云端刷新…');
+  const mt = $('t-mtalk').checked ? 1 : 0;
+  const gh = $('t-github').checked ? 1 : 0;
+  const r = await run(
+    'sed -i "s/^USE_MTALK=.*/USE_MTALK=' + mt + '/;s/^USE_GITHUB=.*/USE_GITHUB=' + gh + '/" ' + MODDIR + '/config\n' +
+    'sh ' + MGR + ' refresh 2>&1')
+  out(r === null ? '无法执行' : (r || '(无输出)'));
+  await loadUserHosts();
+});
+
+$('btn-cc').onclick = e => busy(e.target, async () => {
+  const v = ($('cc-input').value || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(v)) { out('请输入两位国家码，如 US / CN / JP'); return; }
+  out('正在设置国家码 ' + v + ' …');
+  const r = await run('sh ' + MGR + ' set-cc ' + v + ' 2>&1');
+  out(r === null ? '无法执行' : (r || '(无输出)'));
+});
+
+$('btn-cc-default').onclick = e => busy(e.target, async () => {
+  out('恢复自动国家码…');
+  const r = await run('cmd wifi force-country-code disabled 2>&1; echo "--- done ---"');
+  out(r === null ? '无法执行' : (r || '(无输出)'));
+});
+
+$('btn-save-user').onclick = e => busy(e.target, async () => {
+  const raw = $('user-hosts').value || '';
+  // Escape for single-quoted shell heredoc
+  // base64 keeps quotes / newlines / unicode intact through the shell
+  const b64 = btoa(unescape(encodeURIComponent(raw)));
+  out('正在保存手动条目…');
+  const r = await run(
+    'echo ' + b64 + ' | base64 -d > ' + MODDIR + '/user-hosts\n' +
+    'sh ' + MGR + ' apply 2>&1\n' +
+    'echo "--- done ---"');
+  out(r === null ? '无法执行' : (r || '(无输出)'));
+});
+
+$('btn-apply').onclick = e => busy(e.target, async () => {
+  out('正在应用并重挂…');
+  const r = await run('sh ' + MGR + ' apply 2>&1; echo "--- done ---"');
+  out(r === null ? '无法执行' : (r || '(无输出)'));
+});
+
+refresh();
+loadUserHosts();
+</script>
+</body>
+</html>

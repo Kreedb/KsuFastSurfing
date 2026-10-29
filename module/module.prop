@@ -1,0 +1,6 @@
+id=gcm-hosts-us
+name=GCM + GitHub Hosts
+version=v1.1
+versionCode=2
+author=lingxi
+description=Merges cloud mtalk/GitHub accelerated hosts (fcm-hosts + github-hosts) with user entries, bind-mounts /system/etc/hosts, and applies a configurable Wi-Fi country code (default US).
