@@ -91,9 +91,10 @@
 <div class="card">
   <h2>5GHz / DFS 信道诊断</h2>
   <div class="row"><span class="k">框架国家码</span><span class="v" id="d-fw">—</span></div>
-  <div class="row"><span class="k">内核监管域</span><span class="v" id="d-kernel">—</span></div>
-  <div class="row"><span class="k">PHY 含 100-144</span><span class="v" id="d-unii">—</span></div>
-  <div class="row"><span class="k">扫描到 DFS AP</span><span class="v" id="d-dfs">—</span></div>
+  <div class="row"><span class="k">supplicant</span><span class="v" id="d-kernel">—</span></div>
+  <div class="row"><span class="k">扫到 5GHz AP</span><span class="v" id="d-5g">—</span></div>
+  <div class="row"><span class="k">扫到 100-144 (DFS)</span><span class="v" id="d-unii">—</span></div>
+  <div class="row"><span class="k">扫到 149-165</span><span class="v" id="d-u3">—</span></div>
   <button id="btn-diag" class="alt">运行完整诊断</button>
   <div class="muted">改国家码只影响框架层。若内核监管域或 PHY 不含 100-144，任何国家码都无法让设备看到这些信道。</div>
 </div>
@@ -267,13 +268,15 @@ async function refreshDiag() {
     const i = l.indexOf('=');
     if (i > 0) m[l.slice(0, i).trim()] = l.slice(i + 1).trim();
   });
+  const want = (curCC() || 'US').toUpperCase();
   const fw = (m.framework || '').toUpperCase();
-  setOk($('d-fw'), fw === (curCC() || 'US'), fw || '未获取');
-  const kr = (m.kernel || '').toUpperCase();
-  setOk($('d-kernel'), kr === (curCC() || 'US') && kr !== '00', kr || '无法读取');
-  setOk($('d-unii'), m.unii2c === 'yes', m.unii2c === 'yes' ? '包含' : (m.unii2c === 'no' ? '不包含' : '未知'));
-  const dfs = m.dfs || '';
-  setOk($('d-dfs'), dfs === 'yes', dfs === 'yes' ? '可见' : (dfs === 'no' ? '不可见' : '未知'));
+  setOk($('d-fw'), fw === want, fw && fw !== 'UNKNOWN' ? fw : '未获取');
+  const sup = (m.supplicant || '').toUpperCase();
+  setOk($('d-kernel'), sup === want, sup && sup !== 'UNSET' ? sup : '未设置');
+  const c5 = +(m.bss5g || 0), cu = +(m.unii2c || 0), c3 = +(m.unii3 || 0);
+  setOk($('d-5g'), c5 > 0, c5 + ' 个');
+  setOk($('d-unii'), cu > 0, cu + ' 个');
+  setOk($('d-u3'), c3 > 0, c3 + ' 个');
 }
 
 function curCC() {

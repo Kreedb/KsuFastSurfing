@@ -1,6 +1,8 @@
 #!/system/bin/sh
-# Dump every layer that can restrict 5GHz/DFS channels, then point at the
-# layer that is actually blocking. Read-only: changes nothing.
+# Diagnose why 5GHz DFS channels (100-144) stay invisible. Read-only.
+# Deliberately avoids `iw`: most retail Android images simply don't ship it,
+# which made the previous version report "iw unavailable" for three of the
+# five layers (see the fallbacks below).
 MODDIR=${0%/*}
 case "$MODDIR" in */*) ;; *) MODDIR=. ;; esac
 OUT="$MODDIR/diagnose.log"
@@ -17,99 +19,100 @@ say "=============================================="
 # ---------- 1. framework ----------
 say ""
 say "--- [1] framework (WifiService) ---"
-if command -v cmd >/dev/null 2>&1; then
-  st=$(cmd wifi status 2>&1)
-  echo "$st" >> "$OUT"
-  cc_fw=$(echo "$st" | grep -i 'country code' | head -1 | sed 's/.*: *//' | tr -d '\r')
-  say "framework_cc=${cc_fw:-unknown}"
+st=$(cmd wifi status 2>&1)
+# dumpsys carries the authoritative values; cmd wifi status does not print them
+dcc=$(dumpsys wifi 2>/dev/null | grep -iE '^(Current|Persistent|Telephony|OEM) Country ?Code:' | head -6)
+if [ -n "$dcc" ]; then
+  echo "$dcc" >> "$OUT"
+  echo "$dcc" | sed 's/^/  /'
 else
-  say "framework_cc=cmd unavailable"
+  say "  (dumpsys produced no Country Code lines)"
 fi
+cur=$(echo "$dcc" | grep -i '^Current Country' | head -1 | sed 's/.*: *//' | tr -d '\r')
+tree=$(echo "$dcc" | grep -iE '^(Persistent|Telephony|OEM)' | tr '\n' ' ')
+say "framework_cc=${cur:-unknown}"
+say "framework_sources=${tree:-none}"
 say "settings_country=$(settings get global wifi_country_code 2>/dev/null)"
 
-# ---------- 2. kernel regulatory domain ----------
+# ---------- 2. kernel / wpa_supplicant ----------
 say ""
-say "--- [2] kernel regdb (cfg80211) ---"
+say "--- [2] wpa_supplicant (acts as the regdb hint) ---"
+sup=""
+for f in /data/misc/apexdata/com.android.wifi/WifiSupplicantControl/wpa_supplicant.conf \
+         /data/misc/wifi/wpa_supplicant.conf \
+         /data/vendor/wifi/wpa/wpa_supplicant.conf; do
+  [ -r "$f" ] || continue
+  sup=$(grep -iE '^[[:space:]]*country=' "$f" 2>/dev/null | head -1 | sed 's/.*=//' | tr -d '\r')
+  say "conf=$f"
+  break
+done
+say "supplicant_country=${sup:-unset}"
 if command -v iw >/dev/null 2>&1; then
-  reg=$(iw reg get 2>&1)
-  echo "$reg" >> "$OUT"
-  # "country US:" / "country 00:" (00 = world domain, the usual culprit)
-  dom=$(echo "$reg" | grep -o 'country [A-Z0-9][A-Z0-9]' | head -1 | awk '{print $2}')
-  say "kernel_regdomain=${dom:-none}"
-  case "$dom" in
-    00|"") say "  !! world domain (00) = most DFS/UNII-2C channels marked NO-IR" ;;
-  esac
+  say "iw_reg=$(iw reg get 2>&1 | grep -o 'country [A-Z0-9][A-Z0-9]' | head -1 | awk '{print $2}')"
 else
-  say "kernel_regdomain=iw unavailable"
+  say "iw_reg=n/a (iw not shipped on this image)"
 fi
 
-# ---------- 3. what the PHY actually allows ----------
+# ---------- 3. what the radio actually scanned ----------
 say ""
-say "--- [3] phy channel table (the ground truth) ---"
-if command -v iw >/dev/null 2>&1; then
-  phy=$(iw list 2>/dev/null || iw phy 2>/dev/null)
-  echo "$phy" >> "$OUT"
-  # Channels 100-144 live in 5470-5725 MHz.
-  # Channel numbers are the definition; frequencies near 5725 belong to
-  # channel 149 (UNII-3), so matching on frequency alone gives false positives.
-  seg=$(echo "$phy" | awk '
-    match($0, /[0-9]+ MHz \[[0-9]+\]/) {
-      ch = $0
-      sub(/.*\[/, "", ch); sub(/\].*/, "", ch)
-      if (ch + 0 >= 100 && ch + 0 <= 144) { print; n++; if (n >= 12) exit }
-    }')
-  if [ -n "$seg" ]; then
-    say "unii2c_channels_present=yes"
-    echo "$seg" | sed 's/^[[:space:]]*//' | while read -r l; do say "  $l"; done
-  else
-    say "unii2c_channels_present=NO"
-    say "  !! the radio never advertises channel 100-144 -> firmware/driver"
-    say "     excludes UNII-2C. No country-code trick can add them back."
-  fi
-  passive=$(echo "$phy" | grep -c 'radar detection')
-  say "channels_with_radar_flag=$passive"
-else
-  say "phy=iw unavailable"
+say "--- [3] scan results (ground truth, no iw needed) ---"
+SR=$(cmd wifi list-scan-results 2>&1)
+echo "$SR" >> "$OUT"
+n_all=$(echo "$SR" | awk 'NR>1 && $2 ~ /^[0-9]+$/ {c++} END{print c+0}')
+say "bss_total=$n_all"
+if [ "$n_all" = "0" ]; then
+  say "  (no cached results - run: cmd wifi start-scan, then re-run this)"
 fi
+# 5GHz = 4900-5895, UNII-2C (ch100-144) = 5470-5725
+n_5g=$(echo "$SR" | awk 'NR>1 && $2+0>=4900 && $2+0<=5895 {c++} END{print c+0}')
+n_unii2c=$(echo "$SR" | awk 'NR>1 && $2+0>=5470 && $2+0<=5725 {c++} END{print c+0}')
+say "bss_5ghz=$n_5g"
+say "bss_unii2c=$n_unii2c"
+if [ "$n_unii2c" -gt 0 ] 2>/dev/null; then
+  say "  UNII-2C APs seen:"
+  echo "$SR" | awk 'NR>1 && $2+0>=5470 && $2+0<=5725 {printf "    %s MHz  %s\n", $2, $5}' | head -10 >> "$OUT"
+  echo "$SR" | awk 'NR>1 && $2+0>=5470 && $2+0<=5725 {printf "    %s MHz  %s\n", $2, $5}' | head -10 | sed 's/^/  /'
+fi
+say "freq_list=$(echo "$SR" | awk 'NR>1 && $2 ~ /^[0-9]+$/ {print $2}' | sort -un | tr '\n' ' ')"
 
-# ---------- 4. Qualcomm WLAN config ----------
+# ---------- 4. vendor WLAN config ----------
 say ""
-say "--- [4] vendor (Qualcomm) WLAN config ---"
+say "--- [4] vendor WLAN config ---"
+found=0
 for f in /vendor/etc/wifi/WCNSS_qcom_cfg.ini \
          /vendor/etc/wifi/wifi_con_mode.conf \
-         /system/etc/wifi/WCNSS_qcom_cfg.ini; do
-  if [ -r "$f" ]; then
-    say "found: $f"
-    grep -iE 'country|regdom|11d' "$f" 2>/dev/null | sed 's/^/    /' | tee -a "$OUT"
-  fi
+         /odm/etc/wifi/WCNSS_qcom_cfg.ini; do
+  [ -r "$f" ] || continue
+  found=1
+  say "found: $f"
+  grep -iE 'country|regdom|11d' "$f" 2>/dev/null | head -8 | sed 's/^/    /' >> "$OUT"
+  grep -iE 'country|regdom|11d' "$f" 2>/dev/null | head -8 | sed 's/^/  /'
 done
-[ -e /vendor/etc/wifi/WCNSS_qcom_wlan_nv.bin ] && say "nv_bin: present (DefaultCountryTable may pin the domain)"
-say "wlan_ini_country=$(grep -i '^gStaCountryCode' /vendor/etc/wifi/WCNSS_qcom_cfg.ini 2>/dev/null | head -1)"
+[ "$found" = "0" ] && say "  (no WCNSS_qcom_cfg.ini found - this ROM uses BDF/NV, not the ini)"
+say "vendor_overlay=$(mount 2>/dev/null | grep -c 'WCNSS_qcom_cfg')"
 
-# ---------- 5. is the AP even on ch100? ----------
+# ---------- 5. connected link ----------
 say ""
-say "--- [5] scan: are DFS APs visible at all? ---"
-if command -v iw >/dev/null 2>&1; then
-  dev=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
-  if [ -n "$dev" ]; then
-    say "iface=$dev"
-    sc=$(iw dev "$dev" scan 2>/dev/null)
-    dfs=$(echo "$sc" | grep -E 'freq: (5[4-6][0-9][0-9])' | sort -u)
-    if [ -n "$dfs" ]; then
-      say "dfs_beacons_seen=yes"
-      echo "$dfs" | head -10 | while read -r l; do say "  $l"; done
-    else
-      say "dfs_beacons_seen=no"
-    fi
-    say "total_bss=$(echo "$sc" | grep -c '^BSS')"
-  fi
-fi
+say "--- [5] current link ---"
+echo "$st" | grep -iE 'connected to|Frequency:' | sed 's/^[[:space:]]*/  /' | head -4 >> "$OUT"
+echo "$st" | grep -iE 'WifiInfo:' | head -1 | cut -c1-160 | sed 's/^/  /'
+say ""
 
 # ---------- verdict ----------
-say ""
 say "--- verdict ---"
-say "If [3] says unii2c_channels_present=NO  -> firmware/driver layer."
-say "If [2] says kernel_regdomain=00         -> regdb world domain."
-say "If [1] and [2] both say $CC_WANT but [3] lacks UNII-2C -> Qualcomm cfg/NV."
-say "If [5] sees the AP but [3] forbids it   -> passive-scan only, no fix."
+if [ -n "$cur" ] && [ "$cur" != "$CC_WANT" ]; then
+  say "framework=$cur but config wants $CC_WANT -> the force-country-code call is not sticking"
+elif [ "$cur" = "$CC_WANT" ]; then
+  say "framework already $cur -> the country code IS applied; the block is elsewhere"
+fi
+if [ "${n_unii2c:-0}" -gt 0 ] 2>/dev/null; then
+  say "UNII-2C APs ARE visible -> channels work; if Settings hides them, that is"
+  say "  a UI/scan-cache issue, try: cmd wifi start-scan (twice, 10s apart)"
+elif [ "${n_5g:-0}" -gt 0 ] 2>/dev/null; then
+  say "5GHz visible but no UNII-2C AP -> either none nearby, or DFS is filtered."
+  say "  Move next to the AP and re-run; if still 0, the radio is filtering DFS."
+else
+  say "No 5GHz at all -> check WLAN band setting / AP is on 2.4GHz."
+fi
+say "Deeper check (root): dmesg | grep -i -E 'regdom|country|dfs'"
 exit 0

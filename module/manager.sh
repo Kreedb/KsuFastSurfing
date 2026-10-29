@@ -252,32 +252,23 @@ case "$1" in
   regdom)    cmd_apply_regdom ;;
   diagnose)  sh "$MODDIR/diagnose.sh" ;;
   cc-check)
-    # Report every layer's opinion of the country code, so a "set to US but
-    # still no ch100" case can be traced to the layer that actually blocks.
-    printf 'framework=%s\n' "$(cmd wifi status 2>/dev/null | grep -i 'country code' | head -1 | sed 's/.*: *//' | tr -d '\r')"
-    if command -v iw >/dev/null 2>&1; then
-      printf 'kernel=%s\n' "$(iw reg get 2>/dev/null | grep -o 'country [A-Z0-9][A-Z0-9]' | head -1 | awk '{print $2}')"
-      printf 'unii2c=%s\n' "$( (iw list 2>/dev/null || iw phy 2>/dev/null) | awk '
-        match($0,/\[[0-9]+\]/){c=$0;sub(/.*\[/,"",c);sub(/\].*/,"",c);
-          if(c+0>=100&&c+0<=144){print "yes";found=1;exit}}
-        END{if(!found)print "no"}' )"
-    else
-      printf 'kernel=iw-missing\n'
-      printf 'unii2c=unknown\n'
-    fi
-    # Are DFS-band beacons actually reachable in a scan?
-    dfs=unknown
-    if command -v iw >/dev/null 2>&1; then
-      d=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
-      if [ -n "$d" ]; then
-        if iw dev "$d" scan 2>/dev/null | grep -qE 'freq: 5[4-6][0-9][0-9]'; then
-          dfs=yes
-        else
-          dfs=no
-        fi
-      fi
-    fi
-    printf 'dfs=%s\n' "$dfs"
+    # Compact key=value summary for the WebUI. No `iw` dependency: retail
+    # Android images usually do not ship it, so we read what the framework
+    # and the scan cache expose instead.
+    cur=$(dumpsys wifi 2>/dev/null | grep -i '^Current Country Code:' | head -1 | sed 's/.*: *//' | tr -d '\r')
+    printf 'framework=%s\n' "${cur:-unknown}"
+    sup=""
+    for f in /data/misc/apexdata/com.android.wifi/WifiSupplicantControl/wpa_supplicant.conf \
+             /data/misc/wifi/wpa_supplicant.conf; do
+      [ -r "$f" ] || continue
+      sup=$(grep -iE '^[[:space:]]*country=' "$f" 2>/dev/null | head -1 | sed 's/.*=//' | tr -d '\r')
+      break
+    done
+    printf 'supplicant=%s\n' "${sup:-unset}"
+    sr=$(cmd wifi list-scan-results 2>&1)
+    printf 'bss5g=%s\n' "$(echo "$sr" | awk 'NR>1 && $2+0>=4900 && $2+0<=5895 {c++} END{print c+0}')"
+    printf 'unii2c=%s\n' "$(echo "$sr" | awk 'NR>1 && $2+0>=5470 && $2+0<=5725 {c++} END{print c+0}')"
+    printf 'unii3=%s\n' "$(echo "$sr" | awk 'NR>1 && $2+0>5725 && $2+0<=5895 {c++} END{print c+0}')"
     printf 'config=%s\n' "$(conf_get CC US)"
     ;;
   *) echo "usage: manager.sh {refresh|apply|status|set-cc XX|regdom|diagnose|cc-check|build|remount}"; exit 2 ;;
