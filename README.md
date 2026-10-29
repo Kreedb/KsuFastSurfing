@@ -159,6 +159,17 @@ PROBE_THREADS=8  # 并发探测数，1-32
 
 探测的域名列表在 `module/domains`，一行一个，`#` 注释。加域名不必改脚本。
 
+候选 IP 的来源依次是：系统解析器（`getent`/`nslookup`，零售 ROM 通常没有）、
+`ping` 自身的解析结果、两个 DoH 端点（Cloudflare 与 Google 的 JSON API）。
+三种并行跑，取并集。可达性以 `time_connect` 判定，而不是 `curl` 的退出码——
+返回 403 或 TLS 失败的站点同样证明链路是通的，早前这些都被丢掉了。
+排序先看 TLS 握手是否完成，再看连接耗时，每个域名留最快的一个。
+
+BSSID 在 Android 12+ 由框架脱敏成 `68:19:**:**:37:c3`（第 3、4 段被抹）。
+页面跑在 root 下，会读 `wpa_supplicant` 的 `scan_results` 拿完整地址，用残存的
+前两段与后两段做匹配——这两段基本唯一，RSSI 只用于同频同前缀时的取舍。
+拿不到 `wpa_cli` 就保留脱敏值，不编造。
+
 ## WiFi 诊断
 
 | 指标 | 说明 |
@@ -249,7 +260,9 @@ sh /data/adb/modules/KsuFastSurfing/manager.sh status
 |---|---|
 | `mounted=0` | 未重启；或 SELinux 阻止 bind mount（看 `mount.log`） |
 | hosts 生效但没加速 | 运营商/DNS 走了 DoT/DoH，绕过 hosts |
-| 探测结果为空 | 本机 DNS 解析不到，或候选全部握手超时；调大 `PROBE_TIMEOUT` |
+| 探测 0 个候选 | 所有解析方式都拿不到地址（DNS 被拦 / 未联网）。不是超时问题，调 `PROBE_TIMEOUT` 无效 |
+| 探测有候选但全不可达 | 地址解析正常，443 连不上；看 `probe.log` 确认是否被墙 |
+| MAC 显示星号 | 该 ROM 没有 `wpa_cli`，只能拿框架脱敏值；不编造地址 |
 | 国家码不生效 | 厂商 ROM 固定在 vendor 层；看 `manager.log` 的 `cmd wifi` 返回 |
 | 国家码生效但无 ch100-144 | `cc-check`；`unii2c=0` 则是固件硬限制，软件无解 |
 
