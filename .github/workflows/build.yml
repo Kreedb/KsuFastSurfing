@@ -8,6 +8,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Needed so the tagged build can attach the zip to a Release.
+permissions:
+  contents: write
+
 jobs:
   package:
     runs-on: ubuntu-latest
