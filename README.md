@@ -1,12 +1,19 @@
-# KsuFastSurfing
+# KsuFastSurfing · 极速冲浪
 
-KernelSU / Magisk 模块：把 **hosts 加速**（FCM + GitHub）和 **WiFi 国家码** 放在同一个无系统改写的模块里。
+**KsuFastSurfing = 极速冲浪。** KernelSU / Magisk 模块：把 **hosts 加速**（FCM + GitHub）和 **WiFi 国家码** 放在同一个无系统改写的模块里。
 
 纯脚本实现，不碰真实分区，卸载即恢复。
 
 <p align="center">
   <code>Android 8+</code> · <code>KernelSU</code> · <code>Magisk</code> · <code>systemless</code>
 </p>
+
+> **关于命名**：项目曾用内部代号 `gcm-hosts-us`，只覆盖 FCM hosts + US 国家码，
+> 无法承载后续新增的云端源、手动条目、任意国家码等功能，故更名为
+> **KsuFastSurfing（极速冲浪）**，模块 id 同步改为 `KsuFastSurfing`。
+> 从旧版升级请先卸载 `gcm-hosts-us` 再装新版 —— 模块 id 变了，
+> 管理器不会把它们当作同一个模块，目录也会从 `/data/adb/modules/gcm-hosts-us`
+> 变成 `/data/adb/modules/KsuFastSurfing`。
 
 ---
 
@@ -122,9 +129,9 @@ status    机器可读状态（供 WebUI 消费）
 三个日志，各自对应一个阶段：
 
 ```
-/data/adb/modules/gcm-hosts-us/mount.log     挂载结果 + 校验结论
-/data/adb/modules/gcm-hosts-us/service.log   开机后 refresh 的返回
-/data/adb/modules/gcm-hosts-us/manager.log   下载、合并、国家码的每次尝试
+/data/adb/modules/KsuFastSurfing/mount.log     挂载结果 + 校验结论
+/data/adb/modules/KsuFastSurfing/service.log   开机后 refresh 的返回
+/data/adb/modules/KsuFastSurfing/manager.log   下载、合并、国家码的每次尝试
 ```
 
 不写日志的模块在真机上没法排障 —— 用户只能看到"没生效"，看不到"为什么"。
@@ -147,7 +154,7 @@ KsuFastSurfing/
 ├── README.md            仓库说明 + 设计约定（本文件）
 ├── LICENSE              GPL-3.0
 ├── build.sh             打包脚本，产出 dist/<id>-<version>.zip
-├── dist/                构建产物（不入库）
+├── dist/                构建产物（不入库，KsuFastSurfing-vX.Y.zip）
 └── module/              模块本体，原样打进 zip 根目录
     ├── module.prop
     ├── config           运行配置（CC / USE_MTALK / USE_GITHUB）
@@ -185,6 +192,28 @@ KsuFastSurfing/
 - **不依赖 `curl`/`wget` 必然存在**，按 `curl → wget → busybox wget` 顺序降级
 - **修改状态前先 `umount`**，挂载操作要幂等
 - **所有写文件走「临时文件 + 校验 + mv」**，不做原地覆盖
+
+### WebUI 规范
+
+- **不要写 `import { exec } from 'kernelsu'`**
+  该名字是 npm 包（`kernelsu`），必须先用 parcel/esbuild 打包成 bundle 才能用。
+  静态 `index.html` 里直接 import，WebView 会抛
+  `Failed to resolve module specifier "kernelsu"`，而且因为后续代码不执行，
+  **所有状态显示为空、所有开关都是关闭状态** —— 看上去像"功能全坏了"，实际只是导入方式错了。
+- 正确做法是直接调用管理器注入的全局对象（`WebViewInterface.kt` 里
+  `webView.addJavascriptInterface(webviewInterface, "ksu")`）：
+
+  ```js
+  ksu.exec(cmd, JSON.stringify(options), callbackName)  // 同步返回，结果走回调
+  // 之后管理器会以 javascript: URL 方式回调
+  // callbackName(errno, stdout, stderr)
+  ```
+
+  需要 Promise 就自己包一层（见 `webroot/index.html` 的 `exec()` 实现），
+  记得配一个超时兜底，否则桥断了 UI 会一直转圈。
+- **模块路径不要硬编码**，用 `JSON.parse(ksu.moduleInfo()).moduleDir`。
+  硬编码路径在项目改名（如本次 `gcm-hosts-us` → `KsuFastSurfing`）后会直接失效。
+- 拿不到 `ksu` 时必须**降级成可读提示**（告诉用户用命令行），而不是抛异常或白屏。
 
 ### 配置与状态
 
@@ -235,7 +264,7 @@ awk '/^[0-9]/{print $2}' module/hosts | sort | uniq -d   # 无重复（应无输
 
 ## 安装
 
-1. 从 [Releases](../../releases) 下载 `gcm-hosts-us-vX.Y.zip`
+1. 从 [Releases](../../releases) 下载 `KsuFastSurfing-vX.Y.zip`
 2. KernelSU 管理器 → 模块 → 从本地安装 → 选择 zip
 3. 重启
 
@@ -255,9 +284,9 @@ Magisk 同样适用（`cmd wifi` 需要 Android 10+）。
 没有 WebUI 界面时也能用命令行：
 
 ```sh
-su -c 'sh /data/adb/modules/gcm-hosts-us/manager.sh status'
-su -c 'sh /data/adb/modules/gcm-hosts-us/manager.sh refresh'
-su -c 'sh /data/adb/modules/gcm-hosts-us/manager.sh set-cc JP'
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh status'
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh refresh'
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh set-cc JP'
 ```
 
 ## 配置
@@ -275,9 +304,9 @@ USE_GITHUB=1   # 1 启用 GitHub 层
 先看日志，再看状态：
 
 ```sh
-cat /data/adb/modules/gcm-hosts-us/mount.log     # 挂载是否成功
-cat /data/adb/modules/gcm-hosts-us/manager.log   # 下载/合并/国家码
-sh /data/adb/modules/gcm-hosts-us/manager.sh status
+cat /data/adb/modules/KsuFastSurfing/mount.log     # 挂载是否成功
+cat /data/adb/modules/KsuFastSurfing/manager.log   # 下载/合并/国家码
+sh /data/adb/modules/KsuFastSurfing/manager.sh status
 ```
 
 | 现象 | 常见原因 |

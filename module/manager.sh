@@ -89,7 +89,7 @@ cmd_build() {
   fi
 
   {
-    echo "# Generated $(date '+%Y-%m-%d %H:%M:%S') by gcm-hosts-us"
+    echo "# Generated $(date '+%Y-%m-%d %H:%M:%S') by KsuFastSurfing"
     echo "# layers: user-hosts > github > mtalk"
     echo
     echo "127.0.0.1\tlocalhost"

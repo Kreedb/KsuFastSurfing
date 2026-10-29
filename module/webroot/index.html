@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GCM / GitHub Hosts</title>
+<title>KsuFastSurfing 极速冲浪</title>
 <style>
   :root {
     color-scheme: dark;
@@ -50,8 +50,8 @@
 </style>
 </head>
 <body>
-<h1>GCM / GitHub Hosts</h1>
-<div class="sub">KernelSU · 云端合并 · WiFi US</div>
+<h1>KsuFastSurfing 极速冲浪</h1>
+<div class="sub">KernelSU · hosts 加速 · WiFi 国家码</div>
 
 <div class="card">
   <h2>状态</h2>
@@ -98,28 +98,74 @@
 <div class="muted">hosts 在 post-fs-data 阶段绑定挂载；云端刷新在开机后异步执行，失败自动回退本地缓存。</div>
 
 <script>
+/* KernelSU injects a global `ksu` JS interface (JavascriptInterface "ksu").
+   The npm package `kernelsu` must be bundled before use - importing it
+   directly from a static page fails with "Failed to resolve module specifier".
+   So we call ksu.exec(cmd, optionsJson, callbackName) directly. */
+
 const $ = id => document.getElementById(id);
-const MODDIR = '/data/adb/modules/gcm-hosts-us';
-const MGR = MODDIR + '/manager.sh';
 const out = m => { $('out').textContent = m; };
 
-let execFn = null;
-async function getExec() {
-  if (execFn) return execFn;
-  try {
-    const m = await import('kernelsu');
-    execFn = m.exec;
-  } catch (e) {
-    out('未检测到 KernelSU WebUI 环境：' + e);
-  }
-  return execFn;
+let MODDIR = '/data/adb/modules/KsuFastSurfing';
+let MGR = MODDIR + '/manager.sh';
+
+function hasKsu() {
+  return typeof ksu !== 'undefined' && ksu !== null && typeof ksu.exec === 'function';
 }
 
-async function run(cmd) {
-  const exec = await getExec();
-  if (!exec) return null;
-  const r = await exec(cmd, { cwd: '/' });
-  return (r.stdout || '') + (r.stderr || '');
+let callSeq = 0;
+
+/* Promise wrapper around ksu.exec's callback contract:
+   ksu.exec(cmd, optionsJson, cbName) -> cbName(errno, stdout, stderr) */
+function exec(cmd, options) {
+  return new Promise((resolve, reject) => {
+    if (!hasKsu()) {
+      reject(new Error('KernelSU WebUI 接口不可用'));
+      return;
+    }
+    const cb = '__ksu_cb_' + Date.now() + '_' + (callSeq++);
+    let done = false;
+    window[cb] = (errno, stdout, stderr) => {
+      if (done) return;
+      done = true;
+      try { delete window[cb]; } catch (e) { window[cb] = undefined; }
+      resolve({ errno: errno, stdout: stdout || '', stderr: stderr || '' });
+    };
+    try {
+      ksu.exec(cmd, JSON.stringify(options || {}), cb);
+    } catch (e) {
+      delete window[cb];
+      reject(e);
+    }
+    /* Safety net: never leave the UI waiting forever if the bridge drops. */
+    setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { delete window[cb]; } catch (e) { window[cb] = undefined; }
+      reject(new Error('执行超时'));
+    }, 120000);
+  });
+}
+
+async function run(cmd, options) {
+  try {
+    const r = await exec(cmd, options);
+    return (r.stdout || '') + (r.stderr || '');
+  } catch (e) {
+    out('执行失败：' + (e && e.message ? e.message : e));
+    return null;
+  }
+}
+
+async function resolveModDir() {
+  if (!hasKsu() || typeof ksu.moduleInfo !== 'function') return;
+  try {
+    const info = JSON.parse(ksu.moduleInfo());
+    if (info && info.moduleDir) {
+      MODDIR = info.moduleDir;
+      MGR = MODDIR + '/manager.sh';
+    }
+  } catch (e) { /* keep default */ }
 }
 
 function setOk(el, ok, text) {
@@ -128,7 +174,7 @@ function setOk(el, ok, text) {
 }
 
 async function refresh() {
-  const r = await run(MGR + ' status');
+  const r = await run('sh ' + MGR + ' status');
   if (r === null) return;
   const m = {};
   r.split('\n').forEach(l => {
@@ -171,7 +217,7 @@ $('btn-refresh').onclick = e => busy(e.target, async () => {
   const gh = $('t-github').checked ? 1 : 0;
   const r = await run(
     'sed -i "s/^USE_MTALK=.*/USE_MTALK=' + mt + '/;s/^USE_GITHUB=.*/USE_GITHUB=' + gh + '/" ' + MODDIR + '/config\n' +
-    'sh ' + MGR + ' refresh 2>&1')
+    'sh ' + MGR + ' refresh 2>&1');
   out(r === null ? '无法执行' : (r || '(无输出)'));
   await loadUserHosts();
 });
@@ -192,8 +238,7 @@ $('btn-cc-default').onclick = e => busy(e.target, async () => {
 
 $('btn-save-user').onclick = e => busy(e.target, async () => {
   const raw = $('user-hosts').value || '';
-  // Escape for single-quoted shell heredoc
-  // base64 keeps quotes / newlines / unicode intact through the shell
+  /* base64 keeps quotes / newlines / unicode intact through the shell */
   const b64 = btoa(unescape(encodeURIComponent(raw)));
   out('正在保存手动条目…');
   const r = await run(
@@ -209,8 +254,17 @@ $('btn-apply').onclick = e => busy(e.target, async () => {
   out(r === null ? '无法执行' : (r || '(无输出)'));
 });
 
-refresh();
-loadUserHosts();
+(async function init() {
+  if (!hasKsu()) {
+    out('未检测到 KernelSU WebUI 接口。请在 KernelSU 管理器中打开本模块的 WebUI；\n' +
+        '命令行用法：sh ' + MGR + ' status');
+    return;
+  }
+  await resolveModDir();
+  out('就绪 · ' + MODDIR);
+  await refresh();
+  await loadUserHosts();
+})();
 </script>
 </body>
 </html>
