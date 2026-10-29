@@ -61,6 +61,11 @@ let probeOut = 'pairs=12\ntimeout=3\nthreads=8\ntried=12\nok=5\n';
 /* Every command the page issues, so tests can assert on the transport itself
    and not only on the parsed result. */
 const seen = [];
+/* Swapped per case by the capability tests. Held in an object because the mock
+   closes over the binding, and reassigning a `let` it already captured would
+   silently keep answering the old value. */
+const capState = { json: 'survey=no\nmonitor=no\ninjection=no\n' };
+const capOut = () => capState.json;
 
 global.ksu = {
   moduleInfo: () => JSON.stringify({ moduleDir: '/m' }),
@@ -80,6 +85,7 @@ global.ksu = {
     else if (cmd.includes('manager.sh status')) out = MGR_STATUS;
     else if (cmd.includes('grep -cvE')) out = '12\n';
     else if (cmd.includes('probe.sh')) out = probeOut;
+    else if (/manager\.sh capacity|capacity\.sh/.test(cmd)) out = capOut();
     setTimeout(() => global.window[cb](0, out, ''), 0);
   }
 };
@@ -192,6 +198,48 @@ setTimeout(async () => {
   ok('chinese ssid renders intact', apHtml.includes('华科'), apHtml.slice(0, 200));
   ok('chinese ssid with space intact', apHtml.includes('咖啡馆 5G'), apHtml.slice(0, 200));
   ok('no replacement glyphs', !/\ufffd/.test(apHtml), apHtml.slice(0, 200));
+
+  console.log('== hardware capability ==');
+  /* The whole point is to let the device answer instead of guessing from the
+     model, so the render must not soften a "no" into something that reads like
+     a yes, and the two monitor-mode states must stay distinguishable. */
+  capState.json = 'soc=SM8650\nhardware=qcom\ndriver=qcacld\ninterfaces=wlan0\n' +
+    'phys=1\nsurvey=no\nnoise=none\nmonitor=no\ninjection=no\nexternal_adapter=no\n';
+  await g('btn-cap').onclick();
+  eq('survey shown as unsupported', g('cap-survey').textContent, '不支持');
+  eq('monitor shown as unsupported', g('cap-mon').textContent, '不支持');
+  eq('injection shown as unsupported', g('cap-inj').textContent, '不支持');
+  ok('driver line names the soc', g('cap-drv').textContent.includes('qcacld'),
+     g('cap-drv').textContent);
+  ok('nothing supported is reported honestly',
+     /无法给出噪声\/频谱/.test(g('status-text').textContent), g('status-text').textContent);
+
+  /* Survey supported: the channel count is what makes it actionable, so a bare
+     "支持" is not enough. */
+  capState.json = 'soc=SM8650\ndriver=qcacld\nsurvey=yes\nsurvey_channels=38\n' +
+    'monitor=no\ninjection=no\nexternal_adapter=no\n';
+  await g('btn-cap').onclick();
+  eq('survey carries the channel count', g('cap-survey').textContent, '支持（38 个信道）');
+  eq('survey is green when supported', g('cap-survey').className, 'v ok');
+
+  /* The driver claims monitor mode but the interface cannot be created. That
+     must read as a failure, not as support: it is the exact situation where a
+     feature looks buildable and then cannot run. */
+  capState.json = 'soc=SM8650\ndriver=bcmdhd\nsurvey=unknown\nmonitor=yes\n' +
+    'monitor_creatable=no\ninjection=no\nexternal_adapter=yes\n';
+  await g('btn-cap').onclick();
+  eq('claimed but unusable monitor is called out',
+     g('cap-mon').textContent, '声明支持，但建不出接口');
+  eq('claimed monitor is red', g('cap-mon').className, 'v bad');
+  eq('external adapter detected', g('cap-ext').textContent, '已连接');
+  eq('survey unknown is not a yes', g('cap-survey').textContent, '未确认');
+
+  /* Only when injection is actually reachable does the summary offer it. */
+  capState.json = 'soc=SM8650\ndriver=bcmdhd\nsurvey=yes\nmonitor=yes\ninjection=yes\n' +
+    'external_adapter=no\n';
+  await g('btn-cap').onclick();
+  ok('summary lists what is usable', /可用 .*注入/.test(g('status-text').textContent),
+     g('status-text').textContent);
 
   console.log('== failure is visible, not silent ==');
   g('c-input').value = 'X';

@@ -246,6 +246,9 @@ case "$1" in
   # subcommands is gone: Android's awk has no strftime and no math functions, so
   # every feature had to be written around those gaps.
   diagnose)  sh "$MODDIR/diagnose.sh" ;;
+  # Hardware capability report: what this radio can and cannot do, so a feature
+  # request can be answered with the device's own answer instead of a guess.
+  capacity)  sh "$MODDIR/capacity.sh" ${2:+--json} ;;
   cc-check)
     printf 'framework=%s\n' "$(cc_current)"
     sr=$(cmd wifi list-scan-results 2>&1)
@@ -271,5 +274,5 @@ case "$1" in
     printf 'config=%s\n' "$(conf_get CC US)"
     printf 'kernel=%s\n' "$( [ -r /sys/module/cfg80211/parameters/ieee80211_regdom ] && cat /sys/module/cfg80211/parameters/ieee80211_regdom || echo unknown )"
     ;;
-  *) echo "usage: manager.sh {probe|refresh|apply|status|set-cc XX|regdom|diagnose|cc-check|build|remount}"; exit 2 ;;
+  *) echo "usage: manager.sh {probe|refresh|apply|status|set-cc XX|regdom|diagnose|capacity|cc-check|build|remount}"; exit 2 ;;
 esac

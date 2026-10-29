@@ -1,6 +1,6 @@
 SKIPUNZIP=0
 set_perm_recursive "$MODPATH" 0 0 0755 0644
-for f in post-fs-data.sh service.sh action.sh uninstall.sh manager.sh customize.sh diagnose.sh probe.sh; do
+for f in post-fs-data.sh service.sh action.sh uninstall.sh manager.sh customize.sh diagnose.sh probe.sh capacity.sh; do
   set_perm "$MODPATH/$f" 0 0 0755
 done
 set_perm "$MODPATH/hosts" 0 0 0644

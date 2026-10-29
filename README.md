@@ -266,6 +266,42 @@ sh /data/adb/modules/KsuFastSurfing/manager.sh status
 | 国家码不生效 | 厂商 ROM 固定在 vendor 层；看 `manager.log` 的 `cmd wifi` 返回 |
 | 国家码生效但无 ch100-144 | `cc-check`；`unii2c=0` 则是固件硬限制，软件无解 |
 
+## 频谱与帧注入的可行性
+
+结论先给：**内置射频做不了频谱仪，也做不了 deauth**。这不是代码量的问题，是两层硬件前提：
+
+| 能力 | 前提 | 手机内置芯片通常如何 |
+|---|---|---|
+| 噪声 / 信道占用 | 驱动实现 `NL80211_CMD_GET_SURVEY` | 高通 `qcacld` 多半没实现，`iw survey dump` 返回空 |
+| 频谱曲线 | 监听模式 + 逐帧 RSSI | 无监听模式，且逐帧 RSSI 本身不是扫频功率 |
+| deauth / 帧注入 | 监听模式 + 固件允许注入 | 原厂固件一律关闭，需打补丁或外接网卡 |
+
+区分三个常被混为一谈的东西：
+
+1. **每 AP 的 RSSI**（本模块已有）：每个网络一个数，不构成频谱。它只覆盖正在发信标的 AP，看不到非 Wi-Fi 干扰源（微波炉、蓝牙、无绳电话）。
+2. **survey 的 channel busy time**：驱动统计"这段时间里该信道有多少比例在忙"。这是时间占比，不是功率，做不了瀑布图，但足以回答"哪个信道被占得最厉害"——比现在按 AP 数估算准得多。
+3. **真正的频谱仪**：每 MHz 的功率曲线，需要监听模式逐包取 RSSI，或外接 SDR。手机内置芯片给不了。
+
+`iw` 在零售 ROM 上不存在，所以本项目不假设它可用：能查的只有
+`/sys/kernel/debug/ieee80211/` 下驱动自己暴露的节点，和 `wpa_cli signal_poll`
+里的 `NOISE=`。两者都拿不到时，结论是"未确认"，不是"支持"。
+
+模块内置 `capacity.sh` 就是让设备自己回答这件事，而不是按机型推测——同一
+系列手机常配不同射频：
+
+```sh
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh capacity'
+```
+
+WebUI「信道」页的**硬件能力**卡片调的是同一个脚本。三项若都是"不支持"，
+就不用再往这个方向投入；若 `survey=yes`，下一步可以加一张信道忙闲图
+（数据现成，只差一次 netlink 读取）。若 `monitor=yes` 而
+`monitor_creatable=no`，说明驱动声明了却没真正实现，这类"看起来能做"的情况
+比直接不支持更容易浪费时间，所以单独标红。
+
+关于 deauth：即便硬件支持，本模块也不会实现。抓包注入是在别人的网络上
+主动干扰，与当前所做"测量自己链路的状况"是两件事。
+
 ## 已知限制
 
 - 开机后第一次刷新是异步的，开机瞬间的 hosts 是上次结果
@@ -311,6 +347,7 @@ KsuFastSurfing/
     ├── uninstall.sh      清理
     ├── customize.sh      安装期权限
     ├── diagnose.sh       四层信道诊断（只读）
+    ├── capacity.sh       射频能力探测（survey / 监听 / 注入）
     ├── probe.sh          本机 IP 探测（并发 + 超时）
     ├── domains           待探测域名列表
     ├── hosts             合并产物（manager.sh build 生成）

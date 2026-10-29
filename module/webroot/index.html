@@ -241,6 +241,15 @@
     <div class="row"><span class="k">DFS 信道</span><span class="v" id="d-ch">—</span></div>
     <div class="muted">UNII-2C 才是信道 100 所在的那一段。两者分开计数，因为只有 100-144 能回答问题"能不能用 ch100"。</div>
   </div>
+  <div class="card">
+    <h2>硬件能力 <button class="mini" id="btn-cap">检测</button></h2>
+    <div class="row"><span class="k">噪声 / 信道占用</span><span class="v" id="cap-survey">—</span></div>
+    <div class="row"><span class="k">监听模式</span><span class="v" id="cap-mon">—</span></div>
+    <div class="row"><span class="k">帧注入</span><span class="v" id="cap-inj">—</span></div>
+    <div class="row"><span class="k">驱动</span><span class="v" id="cap-drv">—</span></div>
+    <div class="row"><span class="k">外接网卡</span><span class="v" id="cap-ext">—</span></div>
+    <div class="muted">这三项由驱动决定，不是开关。噪声/占用要 nl80211 survey；监听模式和帧注入要固件支持。点「检测」让设备自己回答，不要靠机型推测。</div>
+  </div>
 </section>
 
 <!-- ================= hosts ================= -->
@@ -1207,6 +1216,62 @@ $('c-diag').onclick = busy($('c-diag'), async () => {
   if (r === null) { st('诊断失败：无法执行命令', { ok: false }); return; }
   out(r);
   st('诊断完成，完整输出见下方（含 diagnose.log）', { ok: true });
+});
+
+/* Hardware capability. The point is to let the device answer "can you do
+   spectrum / deauth" instead of guessing from the model name: the same phone
+   family ships with different radios, and the driver is what decides. */
+const CAP_WORDS = { yes: '支持', no: '不支持', unknown: '未确认' };
+function capWord(v) {
+  const s = CAP_WORDS[v];
+  return s ? s : (v && v !== 'none' ? v : '—');
+}
+function paintCap(kv) {
+  const set = (id, key, goodWhen) => {
+    const v = kv[key];
+    let txt = capWord(v), cls = '';
+    if (v === goodWhen) cls = 'ok';
+    else if (v === 'no') cls = 'warn';
+    else if (v === 'unknown') cls = 'warn';
+    if (key === 'survey' && v === 'yes' && kv.survey_channels)
+      txt += '（' + kv.survey_channels + ' 个信道）';
+    if (key === 'monitor' && v === 'yes' && kv.monitor_creatable === 'no')
+      { txt = '声明支持，但建不出接口'; cls = 'bad'; }
+    if (key === 'noise' && v && v !== 'none') txt += ' dBm';
+    setV($(id), txt, cls);
+  };
+  set('cap-survey', 'survey', 'yes');
+  set('cap-mon', 'monitor', 'yes');
+  set('cap-inj', 'injection', 'yes');
+  set('cap-drv', 'driver', '@none');
+  $('cap-drv').textContent = (kv.soc && kv.soc !== 'unknown' ? kv.soc + ' · ' : '') +
+                             (kv.driver || '未知');
+  $('cap-drv').className = 'v';
+  setV($('cap-ext'), kv.external_adapter === 'yes' ? '已连接' : '无',
+       kv.external_adapter === 'yes' ? 'ok' : '');
+}
+
+$('btn-cap').onclick = busy($('btn-cap'), async () => {
+  st('正在检测射频能力…', { running: true });
+  const r = await run('sh ' + MGR + ' capacity --json 2>&1');
+  if (r === null) { st('检测失败：无法执行命令', { ok: false }); return; }
+  const kv = {};
+  r.split('\n').forEach(l => {
+    const i = l.indexOf('=');
+    if (i > 0) kv[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+  });
+  paintCap(kv);
+  out(r);
+  /* The values are the strings 'yes'/'no'/'unknown', and 'no' is truthy - the
+     first version of this check treated an explicit "unsupported" as support. */
+  if (kv.survey !== 'yes' && kv.monitor !== 'yes') {
+    st('已检测：这台设备无法给出噪声/频谱，也无法监听', { ok: false, warn: true });
+    return;
+  }
+  const yes = [kv.survey === 'yes' && '噪声', kv.monitor === 'yes' && '监听',
+               kv.injection === 'yes' && '注入'].filter(Boolean);
+  st(yes.length ? '已检测：可用 ' + yes.join(' / ') : '已检测：能力受固件限制',
+     yes.length ? { ok: true } : { ok: false, warn: true });
 });
 
 function clamp(v, a, b) { return isNaN(v) ? a : Math.max(a, Math.min(b, v)); }
