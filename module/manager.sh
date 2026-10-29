@@ -1,17 +1,16 @@
 #!/system/bin/sh
-# Shared control plane for the module: fetch cloud hosts, merge, remount, set CC.
+# Control plane for the module. Everything here is driven by local files:
+# probe.sh measures which IPs actually answer on this device's network,
+# user-hosts holds manual entries, and hosts is the merged result.
 case "$0" in */*) MODDIR=${0%/*} ;; *) MODDIR=. ;; esac
 PATH=/data/adb/ksu/bin:/system/bin:/system/xbin:$PATH
+
 CONF="$MODDIR/config"
-SRC_MTALK="$MODDIR/sources/mtalk.hosts"
-SRC_GITHUB="$MODDIR/sources/github.hosts"
+PROBED="$MODDIR/probed-hosts"
 USER_HOSTS="$MODDIR/user-hosts"
 OUT="$MODDIR/hosts"
 SYS_HOSTS="$MODDIR/system/etc/hosts"
 LOG="$MODDIR/manager.log"
-
-URL_MTALK="https://gh-proxy.org/https://raw.githubusercontent.com/yangFenTuoZi/fcm-hosts/refs/heads/master/hosts"
-URL_GITHUB="https://gh-proxy.org/https://raw.githubusercontent.com/maxiaof/github-hosts/refs/heads/master/hosts"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 
@@ -20,67 +19,14 @@ conf_get() {
   [ -n "$v" ] && echo "$v" || echo "$2"
 }
 
-net_fetch() {
-  url="$1"; dst="$2"
-  tmp="$dst.tmp.$$"
-  rm -f "$tmp"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --connect-timeout 12 --max-time 45 "$url" -o "$tmp" 2>>"$LOG"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$tmp" "$url" 2>>"$LOG"
-  elif command -v busybox >/dev/null 2>&1; then
-    busybox wget -q -O "$tmp" "$url" 2>>"$LOG"
-  else
-    log "no downloader available"
-    return 1
-  fi
-  [ -s "$tmp" ] || { rm -f "$tmp"; return 1; }
-  # sanity: must contain at least one "IP domain" pair
-  if ! awk '/^[ \t]*#/ {next} /^[ \t]*$/ {next}
-            ($1 ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/ || $1 ~ /^[0-9A-Fa-f:]+$/) && NF >= 2 { found=1 } END { exit !found }' "$tmp"; then
-    log "reject invalid payload: $url"
-    rm -f "$tmp"
-    return 1
-  fi
-  mv "$tmp" "$dst" || { rm -f "$tmp"; return 1; }
-  log "fetched $url"
-  return 0
-}
-
-emit_section() {
-  f="$1"; title="$2"
-  [ -s "$f" ] || return 0
-  awk -v seen="$SEEN" -v title="$title" '
-    BEGIN {
-      while ((getline l < seen) > 0) if (l != "") s[l] = 1
-      close(seen)
-      printed = 0
-    }
-    /^[ \t]*#/ { next }
-    /^[ \t]*$/ { next }
-    {
-      ip = $1
-      if (ip !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/ && ip !~ /^[0-9A-Fa-f:]+$/ ) next
-      for (i = 2; i <= NF; i++) {
-        d = $i
-        if (d ~ /^#/) break
-        if (d in s) continue
-        if (!printed) { printf "\n# --- %s ---\n", title; printed = 1 }
-        printf "%s\t%s\n", ip, d
-        printf "%s\n", d >> seen
-        s[d] = 1
-      }
-    }
-  ' "$f"
-}
+# ---------- merged hosts ----------
 
 cmd_build() {
   SEEN=$(mktemp 2>/dev/null || echo "$MODDIR/.seen.$$")
   TMP=$(mktemp 2>/dev/null || echo "$MODDIR/.hosts.$$")
   : > "$SEEN"
 
-  # Reserve user-declared domains first so manual entries always win,
-  # then drop duplicates from the cloud layers.
+  # Reserve user-declared domains first so manual entries always win.
   if [ -s "$USER_HOSTS" ]; then
     awk '/^[ \t]*#/ {next} /^[ \t]*$/ {next}
          ($1 ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/ || $1 ~ /^[0-9A-Fa-f:]+$/) {
@@ -90,28 +36,53 @@ cmd_build() {
 
   {
     echo "# Generated $(date '+%Y-%m-%d %H:%M:%S') by KsuFastSurfing"
-    echo "# layers: user-hosts > github > mtalk"
+    echo "# layers: user-hosts > probed-hosts"
     echo
-    echo "127.0.0.1\tlocalhost"
-    echo "::1\tlocalhost ip6-localhost ip6-loopback"
-    if [ "$(conf_get USE_GITHUB 1)" = "1" ]; then
-      emit_section "$SRC_GITHUB" "GitHub accelerated (maxiaof/github-hosts)"
+    echo "127.0.0.1	localhost"
+    echo "::1	localhost ip6-localhost ip6-loopback"
+
+    if [ -s "$PROBED" ] && [ "$(conf_get USE_PROBED 1)" = "1" ]; then
+      awk -v seen="$SEEN" '
+        BEGIN { while ((getline l < seen) > 0) if (l != "") s[l] = 1; close(seen); p = 0 }
+        /^[ \t]*#/ { next }
+        /^[ \t]*$/ { next }
+        {
+          # probed-hosts is "IP<TAB>host"
+          ip = $1; host = $2
+          if (ip !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) next
+          if (host == "" || host in s) next
+          if (!p) { print ""; print "# --- locally probed ---"; p = 1 }
+          print ip "\t" host
+          s[host] = 1
+        }' "$PROBED"
     fi
-    if [ "$(conf_get USE_MTALK 1)" = "1" ]; then
-      emit_section "$SRC_MTALK" "mtalk / FCM accelerated (yangFenTuoZi/fcm-hosts)"
-    fi
+
     if [ -s "$USER_HOSTS" ]; then
       : > "$SEEN.user"
-      SEEN="$SEEN.user" emit_section "$USER_HOSTS" "user manual entries"
+      awk -v seen="$SEEN.user" '
+        BEGIN { while ((getline l < seen) > 0) if (l != "") s[l] = 1; close(seen); p = 0 }
+        /^[ \t]*#/ { next }
+        /^[ \t]*$/ { next }
+        {
+          if ($1 !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/ && $1 !~ /^[0-9A-Fa-f:]+$/) next
+          ip = $1
+          for (i = 2; i <= NF; i++) {
+            if ($i ~ /^#/) break
+            if (!p) { print ""; print "# --- user manual entries ---"; p = 1 }
+            print ip "\t" $i
+            s[$i] = 1
+          }
+        }' "$USER_HOSTS"
     fi
   } > "$TMP"
+
   chmod 0644 "$TMP" 2>/dev/null
   chown 0:0 "$TMP" 2>/dev/null
   chcon u:object_r:system_file:s0 "$TMP" 2>/dev/null
   mv "$TMP" "$OUT"
-  cp "$OUT" "$SYS_HOSTS" 2>/dev/null
+  [ -f "$SYS_HOSTS" ] && cp "$OUT" "$SYS_HOSTS" 2>/dev/null
   rm -f "$SEEN" "$SEEN.user"
-  log "built hosts: $(grep -c -v '^#' "$OUT" 2>/dev/null || echo 0) lines"
+  log "built hosts: $(grep -c '^[0-9]' "$OUT" 2>/dev/null || echo 0) entries"
 }
 
 cmd_remount() {
@@ -143,11 +114,33 @@ cmd_remount() {
   log "remount done"
 }
 
+# ---------- country code ----------
+
+# One reader for every caller, so the WebUI and status agree on the value.
+# `cmd wifi status` never prints it; `cmd wifi get-country-code` is the API.
+cc_current() {
+  v=""
+  if command -v cmd >/dev/null 2>&1; then
+    # Output wording differs across OEMs ("Country code is: US", "Wifi Country
+    # Code: US", ...), so take the last two-letter uppercase token instead of
+    # trusting a prefix. Passing the whole line through to the UI showed up as
+    # "国家码（当前）COUNTRY CODE IS: US".
+    v=$(cmd wifi get-country-code 2>/dev/null | tr -d '\r' | tr 'a-z' 'A-Z' \
+        | grep -o '[A-Z][A-Z]' | tail -1)
+    [ -n "$v" ] && { echo "$v"; return 0; }
+  fi
+  if command -v dumpsys >/dev/null 2>&1; then
+    v=$(dumpsys wifi 2>/dev/null | sed -n 's/^Current Country Code: *//p' | head -1 | tr -d '\r' \
+        | tr 'a-z' 'A-Z' | tr -cd 'A-Z' )
+    [ ${#v} -eq 2 ] && { echo "$v"; return 0; }
+  fi
+  echo ""
+}
+
 cmd_apply_cc() {
   cc=$(conf_get CC US)
   cc=$(echo "$cc" | tr 'a-z' 'A-Z' | tr -cd 'A-Z')
   if [ ${#cc} -ne 2 ]; then
-    log "invalid CC '$(conf_get CC US)', skip"
     echo "cc=SKIP invalid"
     return 1
   fi
@@ -155,8 +148,7 @@ cmd_apply_cc() {
   while [ $n -lt 5 ]; do
     out=$(cmd wifi force-country-code enabled "$cc" 2>&1)
     case "$out" in
-      *rror*|*xception*|*"not found"*|*nknown*|*ailed*)
-        ;;
+      *rror*|*xception*|*"not found"*|*nknown*|*ailed*) ;;
       *) log "cc set to $cc"; echo "cc=$cc"; return 0 ;;
     esac
     sleep 2
@@ -167,65 +159,62 @@ cmd_apply_cc() {
 }
 
 cmd_apply_regdom() {
-  # cmd wifi only tells the framework. Push the same code into cfg80211 so the
-  # kernel channel table follows. Both are best-effort: on most phones the
-  # vendor WLAN driver keeps its own domain and ignores this.
   cc=$(conf_get CC US)
   cc=$(echo "$cc" | tr 'a-z' 'A-Z' | tr -cd 'A-Z')
   [ ${#cc} -eq 2 ] || { echo "regdom=skipped"; return 1; }
   got=""
-
   if command -v iw >/dev/null 2>&1; then
-    dev=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
-    if [ -n "$dev" ]; then
-      # iw reg set writes the global domain via nl80211
-      iw reg set "$cc" 2>>"$LOG" && got=iw
-    fi
-    iw reg get 2>/dev/null | grep -q "country $cc" && got="${got:-iw}"
+    iw reg set "$cc" 2>>"$LOG" && got=iw
   fi
-
-  # Legacy interface, still honoured by some vendor drivers.
-  if command -v iwconfig >/dev/null 2>&1 && [ -z "$got" ]; then
-    dev=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
-    [ -n "$dev" ] && iwconfig "$dev" reg "$cc" 2>>"$LOG" && got=iwconfig
-  fi
-
   log "regdom set to $cc via ${got:-nothing}"
   echo "regdom=${got:-failed}"
   [ -n "$got" ]
 }
 
+# ---------- status ----------
+
 cmd_status() {
   H=/system/etc/hosts
-  if [ -f "$OUT" ]; then
-    m=$(awk '/^# --- mtalk/{f=1;next} /^# --- /{f=0} f && /^[0-9]/ {c++} END{print c+0}' "$OUT")
-    g=$(awk '/^# --- GitHub/{f=1;next} /^# --- /{f=0} f && /^[0-9]/ {c++} END{print c+0}' "$OUT")
-    u=$(awk '/^# --- user/{f=1;next} /^# --- /{f=0} f && /^[0-9]/ {c++} END{print c+0}' "$OUT")
+  p=0; u=0
+  [ -s "$PROBED" ] && p=$(grep -c '^[0-9]' "$PROBED" 2>/dev/null)
+  [ -s "$USER_HOSTS" ] && u=$(grep -vcE '^[ \t]*(#|$)' "$USER_HOSTS" 2>/dev/null)
+
+  printf 'probed=%s\n' "${p:-0}"
+  printf 'user=%s\n' "${u:-0}"
+  printf 'entries=%s\n' "$(grep -c '^[0-9]' "$OUT" 2>/dev/null || echo 0)"
+
+  # Real mount check: compare the live file with the one we generated. The old
+  # check looked for a domain that no longer exists and always said "unmounted".
+  if [ -f "$OUT" ] && [ -f "$H" ] && cmp -s "$OUT" "$H" 2>/dev/null; then
+    printf 'mounted=1\n'
+  elif [ -f "$H" ] && mount 2>/dev/null | grep -q " $H "; then
+    printf 'mounted=1\n'
   else
-    m=0; g=0; u=0
+    printf 'mounted=0\n'
   fi
-  printf 'mtalk=%s\n' "$m"
-  printf 'github=%s\n' "$g"
-  printf 'user=%s\n' "$u"
-  printf 'mounted=%s\n' "$(grep -q 'mtalk\.google\.com\|github\.com' "$H" 2>/dev/null && echo 1 || echo 0)"
-  printf 'cc=%s\n' "$(conf_get CC US)"
-  printf 'cur_cc=%s\n' "$(cmd wifi status 2>/dev/null | grep -i 'country code' | head -1 | sed 's/.*: *//' | tr -d '\r')"
-  printf 'use_mtalk=%s\n' "$(conf_get USE_MTALK 1)"
-  printf 'use_github=%s\n' "$(conf_get USE_GITHUB 1)"
+
+  want=$(conf_get CC US | tr 'a-z' 'A-Z')
+  cur=$(cc_current)
+  printf 'cc=%s\n' "$want"
+  printf 'cur_cc=%s\n' "$cur"
+  printf 'use_probed=%s\n' "$(conf_get USE_PROBED 1)"
+  printf 'timeout=%s\n' "$(conf_get PROBE_TIMEOUT 3)"
+  printf 'threads=%s\n' "$(conf_get PROBE_THREADS 8)"
 }
 
 case "$1" in
   build)     cmd_build ;;
   remount)   cmd_remount ;;
+  probe)
+    sh "$MODDIR/probe.sh" ${2:+--print}
+    cmd_build
+    cmd_remount
+    ;;
   refresh)
-    rc=0
-    [ "$(conf_get USE_MTALK 1)" = "1" ]  && { net_fetch "$URL_MTALK" "$SRC_MTALK"   || rc=1; }
-    [ "$(conf_get USE_GITHUB 1)" = "1" ] && { net_fetch "$URL_GITHUB" "$SRC_GITHUB" || rc=1; }
+    sh "$MODDIR/probe.sh" >/dev/null 2>&1
     cmd_build
     cmd_remount
     cmd_apply_cc >/dev/null 2>&1
-    cmd_apply_regdom >/dev/null 2>&1 || true
-    echo "refresh_rc=$rc"
     ;;
   apply)
     cmd_build
@@ -251,25 +240,31 @@ case "$1" in
   status)    cmd_status ;;
   regdom)    cmd_apply_regdom ;;
   diagnose)  sh "$MODDIR/diagnose.sh" ;;
+  wifi)      sh "$MODDIR/wifidiag.sh" ${2:-scan} ;;
+  wifi-api)  sh "$MODDIR/wifidiag.sh" api ;;
   cc-check)
-    # Compact key=value summary for the WebUI. No `iw` dependency: retail
-    # Android images usually do not ship it, so we read what the framework
-    # and the scan cache expose instead.
-    cur=$(dumpsys wifi 2>/dev/null | grep -i '^Current Country Code:' | head -1 | sed 's/.*: *//' | tr -d '\r')
-    printf 'framework=%s\n' "${cur:-unknown}"
-    sup=""
-    for f in /data/misc/apexdata/com.android.wifi/WifiSupplicantControl/wpa_supplicant.conf \
-             /data/misc/wifi/wpa_supplicant.conf; do
-      [ -r "$f" ] || continue
-      sup=$(grep -iE '^[[:space:]]*country=' "$f" 2>/dev/null | head -1 | sed 's/.*=//' | tr -d '\r')
-      break
-    done
-    printf 'supplicant=%s\n' "${sup:-unset}"
+    printf 'framework=%s\n' "$(cc_current)"
     sr=$(cmd wifi list-scan-results 2>&1)
-    printf 'bss5g=%s\n' "$(echo "$sr" | awk 'NR>1 && $2+0>=4900 && $2+0<=5895 {c++} END{print c+0}')"
-    printf 'unii2c=%s\n' "$(echo "$sr" | awk 'NR>1 && $2+0>=5470 && $2+0<=5725 {c++} END{print c+0}')"
-    printf 'unii3=%s\n' "$(echo "$sr" | awk 'NR>1 && $2+0>5725 && $2+0<=5895 {c++} END{print c+0}')"
+    # Bucket by channel number, not by frequency range: 5725 MHz is the UNII-2C/
+    # UNII-3 fence, so a frequency test classifies ch149 wrongly.
+    echo "$sr" | awk '
+      NR > 1 && $2 + 0 >= 2400 {
+        f = $2 + 0
+        if (f <= 2500) next                      # 2.4G is not interesting here
+        if (f <= 5895) c = int((f - 5000) / 5); else c = int((f - 5950) / 5)
+        n++
+        if (c >= 52 && c <= 64)                dfs++
+        if (c >= 100 && c <= 144)              { dfs++; u2c++ }
+        if (c >= 149)                          u3++
+      }
+      END {
+        printf "bss5g=%d\n", n + 0
+        printf "unii2c=%d\n", u2c + 0
+        printf "unii3=%d\n", u3 + 0
+        printf "dfs_total=%d\n", dfs + 0
+      }'
     printf 'config=%s\n' "$(conf_get CC US)"
+    printf 'kernel=%s\n' "$( [ -r /sys/module/cfg80211/parameters/ieee80211_regdom ] && cat /sys/module/cfg80211/parameters/ieee80211_regdom || echo unknown )"
     ;;
-  *) echo "usage: manager.sh {refresh|apply|status|set-cc XX|regdom|diagnose|cc-check|build|remount}"; exit 2 ;;
+  *) echo "usage: manager.sh {probe|refresh|apply|status|set-cc XX|regdom|wifi|wifi-api|diagnose|cc-check|build|remount}"; exit 2 ;;
 esac

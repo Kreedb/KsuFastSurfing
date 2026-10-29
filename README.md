@@ -159,7 +159,7 @@ KsuFastSurfing/
 ├── dist/                构建产物（不入库，KsuFastSurfing-vX.Y.zip）
 └── module/              模块本体，原样打进 zip 根目录
     ├── module.prop
-    ├── config           运行配置（CC / USE_MTALK / USE_GITHUB）
+    ├── config           运行配置（CC / USE_PROBED / PROBE_TIMEOUT / PROBE_THREADS）
     ├── manager.sh       唯一控制面
     ├── post-fs-data.sh  启动阶段：不联网
     ├── service.sh       开机后：异步刷新
@@ -168,24 +168,21 @@ KsuFastSurfing/
     ├── diagnose.sh      四层信道诊断（只读）
     ├── customize.sh     安装期权限设置
     ├── system.prop      国家码属性
-    ├── hosts            合并产物（由 manager.sh build 生成）
+    ├── hosts            合并产物（manager.sh build 生成）
+    ├── probed-hosts     探测结果（运行期生成）
     ├── user-hosts       用户手动条目（最高优先级）
-    ├── sources/         云端快照（离线兜底）
+    ├── domains          参与探测的域名列表
+    ├── probe.sh         本地 IP 探测（并发 + 超时）
+    ├── wifidiag.sh      WiFi 诊断：采集/解析/分析
     ├── system/etc/hosts metamodule 路径备份
     └── webroot/         WebUI
 ```
 
-### 新增一条云端源
+### 新增一个要探测的域名
 
-1. 在 `manager.sh` 顶部加 `URL_<NAME>` 和 `SRC_<NAME>` 常量
-2. `config` 加 `USE_<NAME>=1`，`conf_get` 默认值同步
-3. `cmd_build` 里按优先级顺序插入 `emit_section "$SRC_<NAME>" "<显示名>"`
-4. `cmd_status` 加对应的计数（`status` 输出加一行 `字段=值`）
-5. `cmd_refresh` 的下载分支加一行
-6. WebUI 加快关 + 状态行
-7. 打包一份初始快照进 `sources/`
-
-优先级顺序固定为「用户 > 后加的重要源 > 先加的源」，改动时同步更新本文件第 2 节。
+只需在 `module/domains` 里加一行（`#` 注释可用），不必改脚本。
+若某个域名需要指定候选 IP（本机 DNS 不返回或返回的不对），
+再在 `probe.sh` 的 `dns_ips()` 里补一个兜底分支。
 
 ### 脚本规范
 
@@ -247,21 +244,43 @@ awk '/^[0-9]/{print $2}' module/hosts | sort | uniq -d   # 无重复（应无输
 
 | 能力 | 说明 |
 |---|---|
-| hosts 云端合并 | FCM（mtalk）与 GitHub 两个源，可独立开关 |
+| 本地 IP 探测 | 本机 DNS 要候选 IP，TLS 握手测速，只留最快的一个 |
 | 手动条目 | WebUI 编辑，IPv4/IPv6，`#` 注释，优先级最高 |
 | 免写分区 | bind mount，`/system/etc/hosts` 原文件不动 |
 | WiFi 国家码 | 默认 US，可改任意两位码，双通道生效 |
-| WebUI | 状态卡片、源开关、国家码、手动条目编辑 |
-| 离线可用 | 随包带快照，无网络也能正常开机 |
+| WiFi 诊断 | 信道 / 干扰评分 / DFS / 网关丢包 / DNS，见下文 |
+| WebUI | 四个选项卡：概览 / 信道 / hosts / 国家码 |
+| 离线可用 | 开机只合并本地数据，不联网 |
 
-### 云端源
+### 本地 IP 探测（不再预置云端源）
 
-| 层 | 项目 | 地址 |
+早期版本随包内置两份云端 hosts 快照。实测这些 IP 有相当一部分在具体网络里
+根本不通（TCP 能握手、TLS 被重置），预置数据反而会让人怀疑是模块坏了。
+
+现在改为**在本机测量**：
+
+1. 对 `module/domains` 里的每个域名，向本机 DNS 要候选 IP
+2. 对每个 `(域名, IP)` 用 `curl --resolve` 做一次真实 TLS 握手，记录耗时
+3. 每个域名保留耗时最短的那个，写入 `probed-hosts`
+4. `user-hosts` 覆盖探测结果，最终合并成 `hosts`
+
+参数可调（WebUI 或 `config`）：
+
+| 键 | 默认 | 说明 |
 |---|---|---|
-| mtalk / FCM | [yangFenTuoZi/fcm-hosts](https://github.com/yangFenTuoZi/fcm-hosts) | `refs/heads/master/hosts` |
-| GitHub | [maxiaof/github-hosts](https://github.com/maxiaof/github-hosts) | `refs/heads/master/hosts` |
+| `PROBE_TIMEOUT` | 3 | 单次握手超时（秒），1–20 |
+| `PROBE_THREADS` | 8 | 并发数，1–32 |
+| `USE_PROBED` | 1 | 是否启用探测结果 |
 
-均经 `https://gh-proxy.org/` 前缀访问。数据版权归各自项目所有，本项目只做聚合。
+这带来一个直接好处：**开关飞行模式、换 SIM、换 Wi-Fi 之后重测一次即可**，
+不需要等任何上游项目更新。
+
+### 历史说明
+
+早期版本曾内置 [yangFenTuoZi/fcm-hosts](https://github.com/yangFenTuoZi/fcm-hosts)
+与 [maxiaof/github-hosts](https://github.com/maxiaof/github-hosts) 两个云端快照源。
+它们已被本地探测取代，相关代码、`module/sources/` 与两个开关全部移除 ——
+保留一半的兼容层只会让人以为还有云端依赖。
 
 ---
 
@@ -280,9 +299,10 @@ Magisk 同样适用（`cmd wifi` 需要 Android 10+）。
 
 模块详情页 → 打开 WebUI。
 
-- **云端来源**：勾选后点「从云端刷新」，即时下载并重新挂载
-- **WiFi 国家码**：输入两位码（如 `US`/`CN`/`JP`）点「应用」；「恢复自动」交给系统判断
-- **手动条目**：每行 `IP 域名`，保存后自动应用
+- **概览**：当前链路（频率/信道/速率/信号）、周边频谱计数、建议信道、网关与 DNS
+- **信道**：全部 AP 明细、DFS 专用统计
+- **hosts**：探测条目数、手动条目、挂载状态；「探测并应用」按当前超时与线程数重测
+- **国家码**：两位码（如 `US`/`CN`/`JP`）点「应用」；「恢复自动」交给系统判断
 
 没有 WebUI 界面时也能用命令行：
 
@@ -297,9 +317,10 @@ su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh set-cc JP'
 `module/config`：
 
 ```
-CC=US          # WiFi 国家码，两位字母
-USE_MTALK=1    # 1 启用 mtalk / FCM 层
-USE_GITHUB=1   # 1 启用 GitHub 层
+CC=US            # WiFi 国家码，两位字母
+USE_PROBED=1     # 1 启用本机探测结果
+PROBE_TIMEOUT=2  # 单次 TLS 握手超时（秒），1-20
+PROBE_THREADS=8  # 并发探测数，1-32
 ```
 
 ## 排障
@@ -318,7 +339,106 @@ sh /data/adb/modules/KsuFastSurfing/manager.sh status
 | hosts 生效但没加速 | 运营商/DNS 走了 DoT/DoH，绕过 hosts |
 | 国家码不生效 | 厂商 ROM 固定了 `ro.boot.wificountrycode`；或 `cmd wifi` 返回格式不同（看 `manager.log`） |
 | 国家码生效但无信道 100–144 | `manager.sh cc-check`；若 `unii2c=no` 则是固件层硬限制，软件无解 |
-| 云端刷新失败 | 代理不可用；此时保留旧缓存，不影响使用 |
+| 探测结果为空 | 本机 DNS 解析不到候选 IP，或所有候选 TLS 握手都超时；调大 `PROBE_TIMEOUT` 重测 |
+| `mounted=0` 且主机名解析正常 | 可能已由 metamodule 路径生效，`status` 以文件内容比对为准 |
+
+## WiFi 诊断
+
+模块的核心现在是一个诊断工具，hosts 只是它的一个旁支功能。
+
+### 它测什么
+
+| 指标 | 来源 | 说明 |
+|---|---|---|
+| 周边 AP 列表 | `cmd wifi list-scan-results` | 频率、信道、RSSI、安全类型 |
+| 连接链路 | `cmd wifi status` 的 `WifiInfo` | 当前 SSID 的真实频率/速率/信号 |
+| 频段分布 | 由频率推导 | 2.4G / 5G / 6G 各多少 |
+| DFS 可见性 | 信道 52–64 / 100–144 | 这是判断能否用 ch100 的唯一硬证据 |
+| 信道拥塞 | 每信道 BSSID 计数 | 找最干净的信道 |
+| 信号质量 | RSSI 分级 | excellent / good / fair / weak |
+| 干扰评分 | RSSI 换算成功率后加权求和 | 同信道全权重，±4 邻道 1/4 |
+| 建议信道 | 干扰评分排序 | 见下节的两条排序规则 |
+| 扫描新鲜度 | 扫描结果的 `Age` 列 | 框架会用缓存，这是唯一诚实的“数据新不新” |
+| 网关 / 丢包 / RTT | `ip route` + `ping` 网关 | 区分“信号弱”和“AP 上行差” |
+| DNS / 出网 | `ping <域名>` | 一次调用同时验证解析与可达 |
+| 多 BSSID | 同 SSID 的 BSSID 计数 | 判断 mesh / 漫游环境 |
+
+### 建议信道是怎么算的
+
+单纯数“这个信道上几个 AP”会骗人：5 个 -80 dBm 的 AP 无所谓，1 个 -25 dBm 的
+AP 就能毁掉整个信道。所以先按 `10^(rssi/10)` 把 dBm 换算成线性功率再求和，
+同信道计全权重，±4 个信道（20 MHz 掩码重叠）计 1/4。
+
+排序有两条容易踩的规则：
+
+1. **DFS 一定要排在所有非 DFS 信道之后**，哪怕它干扰分数是 0。
+   空 DFS 信道算术上最干净，却是最差的建议 —— 它只能被动扫描
+   （发现慢、隐藏 SSID 永远看不到），还会因为雷达驱逐而断流。
+   只按负载排序的话，工具会永远回答“ch 108”，数字没错但建议无用。
+2. **同分时优先本次扫描里真实出现过的信道**，未扫描到的信道只是理论值，
+   可能被射频层过滤掉了。
+
+### busybox awk 没有数学函数
+
+Android 的 toybox/busybox `awk` 是**不编译 math 支持**的，`10^1.5`、`log()`
+直接报 `Math support is not compiled in`。所以功率换算用整数单位 + 循环连乘
+实现（1 单位 = -100 dBm，每 0.5 dB 乘 1.122），既避开 `^`，又不会让
+`%.2f` 把所有真实 AP 都打成 `0.00`。
+
+### 为什么不用 `iw`
+
+零售机型的 Android **不预装 `iw`**（荣耀 MagicOS 实测没有）。
+用 `iw` 做诊断会在真机上得到一片 `unavailable`，看起来像工具坏了。
+本工具全部走 `cmd wifi` 与 `dumpsys`，这两个在所有机型上都存在。
+
+### 一个必须分清的区别
+
+**「扫到了 ch100」≠「设置里能看到 ch100」。**
+
+实测数据里出现过这样的情况：周边 46 个 AP，DFS 段扫到 7 个，
+最强的一个就在 **5500 MHz（ch100）、-25 dBm**，而设置界面里依然看不到它。
+原因是 DFS 信道默认**被动扫描**，且 UI 有独立的展示过滤。
+
+所以判断顺序应该是：
+
+1. 先看 `扫到 100-144` 是否为 0
+2. 为 0 → 要么附近真没有 DFS AP，要么射频层过滤了
+3. 不为 0 → 信道可用，UI 看不到属于展示/缓存问题，手动添加网络即可连
+
+### 命令行
+
+```sh
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh wifi'          # 采集+分析
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh wifi-api'      # 给 WebUI 的原始输出
+su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh cc-check'      # 只看国家码相关
+```
+
+原始采集落在 `/data/adb/modules/KsuFastSurfing/diag/raw/`，
+报告在 `diag/report.txt`，可以整份贴出来排障。
+
+报告分段（`manager.sh wifi` 的输出）：
+
+| 段 | 内容 |
+|---|---|
+| `[summary]` | AP 总数、2.4/5/6G 分布、DFS/UNII-3 计数、最强 AP |
+| `[rf]` | 最强 AP 的 RSSI 与质量分级 |
+| `[link]` | 已连接链路的频率/信道/速率/RSSI/标准/SSID |
+| `[channel]` | 可见的 DFS 信道列表 |
+| `[scan]` | 扫描缓存年龄与条目数 |
+| `[score]` | 建议信道表：加权干扰、同信道数、邻道数 |
+| `[roam]` | 同 SSID 多 BSSID 的统计 |
+| `[congestion]` | 每信道 BSSID 计数（Top 12） |
+| `[aps]` | 逐 AP 明细，按 RSSI 排序（Top 25） |
+| `[net]` | 网关、丢包率、平均 RTT、DNS/出网 |
+| `[verdict]` | 汇总结论：dfs / net / dns_l3 / best_ch |
+
+`[verdict]` 里的 `net` 与 `dfs` 是两个独立维度：
+
+- `net=ok` / `lossy` / `nogw` —— 网关层面
+- `dfs=ok` / `none` / `nodata` —— 射频层面
+
+“信号满格但上不了网”就是 `dfs=ok` + `net=lossy` 或 `dns_l3=fail`，
+一眼能分清是 AP 上行烂还是 DNS 坏了。
 
 ## 5GHz / DFS 信道（重要）
 

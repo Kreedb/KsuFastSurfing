@@ -9,3 +9,6 @@ dist/
 # editor / OS noise
 .DS_Store
 *.swp
+
+# archived experiments, kept locally only
+.archive/

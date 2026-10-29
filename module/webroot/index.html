@@ -3,164 +3,258 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>KsuFastSurfing 极速冲浪</title>
+<title>KsuFastSurfing · WiFi 诊断</title>
 <style>
   :root {
     color-scheme: dark;
-    --bg:#12131a; --card:#1b1d27; --line:#272a37; --fg:#e6e8f0;
-    --dim:#8b90a3; --accent:#3b5bfd; --ok:#3ddc84; --bad:#ff6b6b;
+    --bg:#101218; --card:#191c25; --line:#262a36; --fg:#e7e9f0;
+    --dim:#878da3; --accent:#3b5bfd; --ok:#3ddc84; --warn:#ffb454; --bad:#ff5f6d;
   }
-  * { box-sizing:border-box; }
-  body { margin:0; padding:16px 16px 32px; font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
-         background:var(--bg); color:var(--fg); }
-  h1 { font-size:18px; margin:0 0 4px; }
-  .sub { color:var(--dim); font-size:12px; margin-bottom:16px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; padding:0 0 28px; font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--fg); font-size:14px; }
+  header { padding:16px 16px 10px; }
+  h1 { font-size:17px; margin:0; letter-spacing:.2px; }
+  .sub { color:var(--dim); font-size:12px; margin-top:3px; }
+  nav { display:flex; gap:6px; padding:8px 16px 12px; position:sticky; top:0;
+        background:linear-gradient(var(--bg) 78%, transparent); z-index:5; }
+  nav button { flex:1; padding:9px 4px; border-radius:9px; border:1px solid var(--line);
+               background:#161923; color:var(--dim); font-size:12.5px; font-weight:600; }
+  nav button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .page { display:none; padding:0 16px; }
+  .page.on { display:block; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:13px;
           padding:14px; margin-bottom:12px; }
-  .card h2 { font-size:12px; margin:0 0 10px; color:var(--dim); font-weight:600;
-             letter-spacing:.06em; text-transform:uppercase; }
-  .row { display:flex; justify-content:space-between; align-items:center;
-         padding:7px 0; border-bottom:1px solid #23262f; font-size:13px; gap:10px; }
+  .card h2 { font-size:11.5px; margin:0 0 11px; color:var(--dim); font-weight:700;
+             letter-spacing:.08em; text-transform:uppercase; display:flex;
+             justify-content:space-between; align-items:center; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:10px;
+         padding:7px 0; border-bottom:1px solid #22252f; font-size:13px; }
   .row:last-child { border-bottom:none; }
   .row .k { color:var(--dim); flex:none; }
-  .row .v { text-align:right; word-break:break-all; }
-  .ok { color:var(--ok); } .bad { color:var(--bad); } .dimv { color:var(--dim); }
-  button { width:100%; padding:12px; border-radius:10px; border:none; font-size:14px;
-           font-weight:600; background:var(--accent); color:#fff; margin-top:8px; }
-  button:active { opacity:.75; }
-  button.alt { background:#2a2e3d; color:#c9cede; }
-  button:disabled { opacity:.45; }
-  input[type=text] { width:100%; padding:10px; border-radius:9px; border:1px solid var(--line);
-                     background:#0e0f15; color:var(--fg); font-size:13px; font-family:monospace; }
-  textarea { width:100%; min-height:96px; padding:10px; border-radius:9px; border:1px solid var(--line);
-             background:#0e0f15; color:var(--fg); font-size:12px; font-family:monospace;
-             resize:vertical; line-height:1.5; }
-  label.sw { display:flex; justify-content:space-between; align-items:center; padding:7px 0;
-             font-size:13px; cursor:pointer; }
-  label.sw input { width:44px; height:26px; appearance:none; background:#333748; border-radius:13px;
-                   position:relative; outline:none; cursor:pointer; flex:none; }
-  label.sw input:checked { background:var(--accent); }
-  label.sw input::after { content:''; position:absolute; top:3px; left:3px; width:20px; height:20px;
-                          border-radius:50%; background:#fff; transition:transform .18s; }
-  label.sw input:checked::after { transform:translateX(18px); }
-  pre { background:#0e0f15; border-radius:8px; padding:10px; font-size:11px; overflow:auto;
-        max-height:200px; color:#9fa8c4; margin:8px 0 0; white-space:pre-wrap; word-break:break-all; }
-  .muted { color:#6b7085; font-size:11px; margin-top:8px; line-height:1.6; }
+  .row .v { text-align:right; word-break:break-all; font-variant-numeric:tabular-nums; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  .big { font-size:26px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .hosts { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; text-align:center; }
+  .hosts div span { display:block; }
+  .hosts .n { font-size:19px; font-weight:700; }
+  .hosts .l { font-size:10.5px; color:var(--dim); margin-top:2px; }
+  .bar { height:7px; background:#22252f; border-radius:4px; overflow:hidden; margin-top:4px; }
+  .bar i { display:block; height:100%; background:var(--accent); border-radius:4px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
+  th { text-align:left; color:var(--dim); font-weight:600; padding:5px 4px;
+       border-bottom:1px solid var(--line); font-size:11px; }
+  td { padding:6px 4px; border-bottom:1px solid #1f222b; }
+  td.n { text-align:right; }
+  .tag { display:inline-block; padding:1px 5px; border-radius:4px; font-size:10px;
+         background:#2a2f3f; color:#aeb6cf; }
+  .tag.dfs { background:#3a2a12; color:#ffb454; }
+  .tag.u3 { background:#122f3a; color:#5fd4e6; }
+  button.act { width:100%; padding:12px; border-radius:10px; border:none; font-size:14px;
+               font-weight:650; background:var(--accent); color:#fff; margin-top:8px; }
+  button.act:active { opacity:.75; }
+  button.act.alt { background:#232734; color:#c5cbdd; }
+  button.act:disabled { opacity:.45; }
+  button.mini { padding:5px 10px; border-radius:7px; border:1px solid var(--line);
+                background:#1d212c; color:var(--dim); font-size:11.5px; font-weight:600; }
+  input[type=text], input[type=number], textarea {
+    width:100%; padding:10px; border-radius:9px; border:1px solid var(--line);
+    background:#0d0f15; color:var(--fg); font-size:13px; font-family:ui-monospace,monospace; }
+  textarea { min-height:84px; resize:vertical; line-height:1.5; }
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  label.f { display:block; font-size:11.5px; color:var(--dim); margin:10px 0 5px; }
+  pre { background:#0b0d12; border-radius:9px; padding:10px; font-size:11px; color:#98a2bd;
+        overflow:auto; max-height:230px; margin:8px 0 0; white-space:pre-wrap; word-break:break-all; }
+  .muted { color:#666c80; font-size:11px; line-height:1.6; margin-top:8px; }
+  .sw { display:flex; justify-content:space-between; align-items:center; padding:8px 0; font-size:13px; }
+  .sw input { appearance:none; width:44px; height:26px; background:#333748; border-radius:13px;
+              position:relative; outline:none; flex:none; }
+  .sw input:checked { background:var(--accent); }
+  .sw input::after { content:''; position:absolute; top:3px; left:3px; width:20px; height:20px;
+                     border-radius:50%; background:#fff; transition:transform .18s; }
+  .sw input:checked::after { transform:translateX(18px); }
 </style>
 </head>
 <body>
-<h1>KsuFastSurfing 极速冲浪</h1>
-<div class="sub">KernelSU · hosts 加速 · WiFi 国家码</div>
 
-<div class="card">
-  <h2>状态</h2>
-  <div class="row"><span class="k">mtalk 加速</span><span class="v" id="s-mtalk">—</span></div>
-  <div class="row"><span class="k">GitHub 加速</span><span class="v" id="s-github">—</span></div>
-  <div class="row"><span class="k">手动条目</span><span class="v" id="s-user">—</span></div>
-  <div class="row"><span class="k">/system/etc/hosts</span><span class="v" id="s-mount">—</span></div>
-  <div class="row"><span class="k">国家码 (配置)</span><span class="v" id="s-cc">—</span></div>
-  <div class="row"><span class="k">国家码 (当前)</span><span class="v" id="s-curcc">—</span></div>
-</div>
+<header>
+  <h1>KsuFastSurfing · WiFi 诊断</h1>
+  <div class="sub">信道 / 信号 / DFS / hosts · Android 本地测量</div>
+</header>
 
-<div class="card">
-  <h2>云端来源</h2>
-  <label class="sw"><span>mtalk / FCM 加速</span><input type="checkbox" id="t-mtalk"></label>
-  <label class="sw"><span>GitHub 加速</span><input type="checkbox" id="t-github"></label>
-  <button id="btn-refresh">从云端刷新</button>
-  <div class="muted">源：yangFenTuoZi/fcm-hosts、maxiaof/github-hosts</div>
-</div>
+<nav>
+  <button id="tab-ov" class="on">概览</button>
+  <button id="tab-ap">信道</button>
+  <button id="tab-hs">hosts</button>
+  <button id="tab-cc">国家码</button>
+</nav>
 
-<div class="card">
-  <h2>WiFi 国家码</h2>
-  <input type="text" id="cc-input" placeholder="US" maxlength="2" autocapitalize="characters">
-  <div class="grid2">
-    <button id="btn-cc">应用国家码</button>
-    <button id="btn-cc-default" class="alt">恢复自动</button>
+<!-- ================= 概览 ================= -->
+<section class="page on" id="p-ov">
+  <div class="card">
+    <h2>当前连接 <button class="mini" id="btn-scan">重新扫描</button></h2>
+    <div class="row"><span class="k">SSID</span><span class="v" id="o-ssid">—</span></div>
+    <div class="row"><span class="k">频率 / 信道</span><span class="v" id="o-freq">—</span></div>
+    <div class="row"><span class="k">信号</span><span class="v" id="o-rssi">—</span></div>
+    <div class="row"><span class="k">协商速率</span><span class="v" id="o-link">—</span></div>
+    <div class="row"><span class="k">标准</span><span class="v" id="o-std">—</span></div>
   </div>
-</div>
 
-<div class="card">
-  <h2>手动 hosts 条目</h2>
-  <textarea id="user-hosts" placeholder="1.2.3.4  example.com
-5.6.7.8  another.host"></textarea>
-  <button id="btn-save-user">保存并应用</button>
-  <div class="muted">手动条目优先级最高，会覆盖云端同名域名。</div>
-</div>
+  <div class="card">
+    <h2>周边频谱</h2>
+    <div class="hosts">
+      <div><span class="n" id="o-total">—</span><span class="l">总计 AP</span></div>
+      <div><span class="n" id="o-24">—</span><span class="l">2.4G</span></div>
+      <div><span class="n" id="o-5">—</span><span class="l">5G</span></div>
+      <div><span class="n" id="o-dfs">—</span><span class="l">DFS</span></div>
+    </div>
+    <div class="muted" id="o-note"></div>
+  </div>
 
-<div class="card">
-  <h2>5GHz / DFS 信道诊断</h2>
-  <div class="row"><span class="k">框架国家码</span><span class="v" id="d-fw">—</span></div>
-  <div class="row"><span class="k">supplicant</span><span class="v" id="d-kernel">—</span></div>
-  <div class="row"><span class="k">扫到 5GHz AP</span><span class="v" id="d-5g">—</span></div>
-  <div class="row"><span class="k">扫到 100-144 (DFS)</span><span class="v" id="d-unii">—</span></div>
-  <div class="row"><span class="k">扫到 149-165</span><span class="v" id="d-u3">—</span></div>
-  <button id="btn-diag" class="alt">运行完整诊断</button>
-  <div class="muted">改国家码只影响框架层。若内核监管域或 PHY 不含 100-144，任何国家码都无法让设备看到这些信道。</div>
-</div>
+  <div class="card">
+    <h2>建议信道 <span class="tag" id="o-pick">—</span></h2>
+    <table>
+      <thead><tr><th>ch</th><th class="n">干扰</th><th class="n">同信道</th><th class="n">邻道</th><th>备注</th></tr></thead>
+      <tbody id="o-free"></tbody>
+    </table>
+    <div class="muted">按加权干扰功率排序（同信道全权重，±4 邻道 1/4）。干扰为空信道也不推荐 DFS。</div>
+  </div>
 
-<button id="btn-apply" class="alt">应用配置并重挂</button>
+  <div class="card">
+    <h2>链路与网络</h2>
+    <div class="row"><span class="k">扫描新鲜度</span><span class="v" id="n-age">—</span></div>
+    <div class="row"><span class="k">网关</span><span class="v" id="n-gw">—</span></div>
+    <div class="row"><span class="k">丢包</span><span class="v" id="n-loss">—</span></div>
+    <div class="row"><span class="k">网关 RTT</span><span class="v" id="n-rtt">—</span></div>
+    <div class="row"><span class="k">DNS / 出网</span><span class="v" id="n-dns">—</span></div>
+    <div class="row"><span class="k">同 SSID 多 BSSID</span><span class="v" id="n-roam">—</span></div>
+  </div>
 
-<div class="card" style="margin-top:12px">
-  <h2>输出</h2>
-  <pre id="out">就绪</pre>
-</div>
+  <div class="card">
+    <h2>信号最强的周边 AP</h2>
+    <table>
+      <thead><tr><th>SSID</th><th>信道</th><th class="n">RSSI</th></tr></thead>
+      <tbody id="o-best"></tbody>
+    </table>
+  </div>
+</section>
 
-<div class="muted">hosts 在 post-fs-data 阶段绑定挂载；云端刷新在开机后异步执行，失败自动回退本地缓存。</div>
+<!-- ================= 信道 ================= -->
+<section class="page" id="p-ap">
+  <div class="card">
+    <h2>全部 AP <span class="tag" id="ap-count">—</span></h2>
+    <table>
+      <thead><tr><th>SSID</th><th>ch</th><th>MHz</th><th class="n">RSSI</th><th>类型</th></tr></thead>
+      <tbody id="ap-rows"></tbody>
+    </table>
+    <div class="muted">DFS 为雷达共存信道（52-64 / 100-144），默认被动扫描，发现更慢。</div>
+  </div>
+  <div class="card">
+    <h2>DFS 专用</h2>
+    <div class="row"><span class="k">可见 DFS AP</span><span class="v" id="d-ndfs">—</span></div>
+    <div class="row"><span class="k">DFS 信道</span><span class="v" id="d-ch">—</span></div>
+  </div>
+</section>
+
+<!-- ================= hosts ================= -->
+<section class="page" id="p-hs">
+  <div class="card">
+    <h2>状态</h2>
+    <div class="row"><span class="k">本地探测条目</span><span class="v" id="h-probed">—</span></div>
+    <div class="row"><span class="k">手动条目</span><span class="v" id="h-user">—</span></div>
+    <div class="row"><span class="k">生效条目</span><span class="v" id="h-entries">—</span></div>
+    <div class="row"><span class="k">/system/etc/hosts</span><span class="v" id="h-mount">—</span></div>
+  </div>
+
+  <div class="card">
+    <h2>本地探测</h2>
+    <label class="sw"><span>启用探测结果</span><input type="checkbox" id="h-use"></label>
+    <div class="grid2">
+      <div>
+        <label class="f">超时 (秒)</label>
+        <input type="number" id="h-timeout" min="1" max="20" step="1">
+      </div>
+      <div>
+        <label class="f">并发线程</label>
+        <input type="number" id="h-threads" min="1" max="32" step="1">
+      </div>
+    </div>
+    <div class="grid2">
+      <button class="act" id="h-probe">探测并应用</button>
+      <button class="act alt" id="h-onlyprobe">仅探测</button>
+    </div>
+    <div class="muted">对本机 DNS 返回的候选 IP 逐个做 TLS 握手测速，保留最快的一个。不下载任何云端 hosts。</div>
+  </div>
+
+  <div class="card">
+    <h2>手动条目</h2>
+    <textarea id="h-manual" placeholder="1.2.3.4  example.com&#10;5.6.7.8  another.host"></textarea>
+    <button class="act" id="h-save">保存并应用</button>
+    <div class="muted">优先级最高，覆盖探测结果中的同名域名。</div>
+  </div>
+  <button class="act alt" id="h-remount">重新挂载</button>
+</section>
+
+<!-- ================= 国家码 ================= -->
+<section class="page" id="p-cc">
+  <div class="card">
+    <h2>国家码</h2>
+    <div class="row"><span class="k">配置</span><span class="v" id="c-want">—</span></div>
+    <div class="row"><span class="k">当前 (框架)</span><span class="v" id="c-cur">—</span></div>
+    <input type="text" id="c-input" placeholder="US" maxlength="2" autocapitalize="characters" style="margin-top:10px">
+    <div class="grid2">
+      <button class="act" id="c-set">应用</button>
+      <button class="act alt" id="c-auto">恢复自动</button>
+    </div>
+  </div>
+  <div class="card">
+    <h2>5GHz 可用性</h2>
+    <div class="row"><span class="k">扫到 5GHz AP</span><span class="v" id="c-5g">—</span></div>
+    <div class="row"><span class="k">扫到 100-144</span><span class="v" id="c-unii2c">—</span></div>
+    <div class="row"><span class="k">扫到 149-165</span><span class="v" id="c-unii3">—</span></div>
+    <button class="act alt" id="c-diag">运行完整诊断</button>
+    <div class="muted">改国家码只影响框架层。能否看到 DFS 信道取决于射频与固件，以扫描结果为准。</div>
+  </div>
+  <div class="card"><h2>输出</h2><pre id="out">就绪</pre></div>
+</section>
 
 <script>
-/* KernelSU injects a global `ksu` JS interface (JavascriptInterface "ksu").
-   The npm package `kernelsu` must be bundled before use - importing it
-   directly from a static page fails with "Failed to resolve module specifier".
-   So we call ksu.exec(cmd, optionsJson, callbackName) directly. */
-
 const $ = id => document.getElementById(id);
-const out = m => { $('out').textContent = m; };
-
 let MODDIR = '/data/adb/modules/KsuFastSurfing';
 let MGR = MODDIR + '/manager.sh';
+const out = m => { $('out').textContent = m; };
 
 function hasKsu() {
   return typeof ksu !== 'undefined' && ksu !== null && typeof ksu.exec === 'function';
 }
 
-let callSeq = 0;
-
-/* Promise wrapper around ksu.exec's callback contract:
-   ksu.exec(cmd, optionsJson, cbName) -> cbName(errno, stdout, stderr) */
+let seq = 0;
 function exec(cmd, options) {
   return new Promise((resolve, reject) => {
-    if (!hasKsu()) {
-      reject(new Error('KernelSU WebUI 接口不可用'));
-      return;
-    }
-    const cb = '__ksu_cb_' + Date.now() + '_' + (callSeq++);
+    if (!hasKsu()) { reject(new Error('KernelSU WebUI 接口不可用')); return; }
+    const cb = '__ksu_cb_' + Date.now() + '_' + (seq++);
     let done = false;
     window[cb] = (errno, stdout, stderr) => {
       if (done) return;
       done = true;
       try { delete window[cb]; } catch (e) { window[cb] = undefined; }
-      resolve({ errno: errno, stdout: stdout || '', stderr: stderr || '' });
+      resolve({ errno, stdout: stdout || '', stderr: stderr || '' });
     };
-    try {
-      ksu.exec(cmd, JSON.stringify(options || {}), cb);
-    } catch (e) {
-      delete window[cb];
-      reject(e);
-    }
-    /* Safety net: never leave the UI waiting forever if the bridge drops. */
+    try { ksu.exec(cmd, JSON.stringify(options || {}), cb); }
+    catch (e) { delete window[cb]; reject(e); }
     setTimeout(() => {
       if (done) return;
       done = true;
       try { delete window[cb]; } catch (e) { window[cb] = undefined; }
       reject(new Error('执行超时'));
-    }, 120000);
+    }, 180000);
   });
 }
 
-async function run(cmd, options) {
+async function run(cmd) {
   try {
-    const r = await exec(cmd, options);
+    const r = await exec(cmd);
     return (r.stdout || '') + (r.stderr || '');
   } catch (e) {
     out('执行失败：' + (e && e.message ? e.message : e));
@@ -172,141 +266,253 @@ async function resolveModDir() {
   if (!hasKsu() || typeof ksu.moduleInfo !== 'function') return;
   try {
     const info = JSON.parse(ksu.moduleInfo());
-    if (info && info.moduleDir) {
-      MODDIR = info.moduleDir;
-      MGR = MODDIR + '/manager.sh';
+    if (info && info.moduleDir) { MODDIR = info.moduleDir; MGR = MODDIR + '/manager.sh'; }
+  } catch (e) {}
+}
+
+/* ---------- tabs ---------- */
+const TABS = [['tab-ov','p-ov'],['tab-ap','p-ap'],['tab-hs','p-hs'],['tab-cc','p-cc']];
+TABS.forEach(([b,p]) => {
+  $(b).onclick = () => {
+    TABS.forEach(([b2,p2]) => {
+      $(b2).classList.toggle('on', b2 === b);
+      $(p2).classList.toggle('on', p2 === p);
+    });
+  };
+});
+
+function setV(el, text, cls) { el.textContent = text; el.className = 'v' + (cls ? ' ' + cls : ''); }
+
+function parseKV(txt) {
+  const m = {};
+  (txt || '').split('\n').forEach(l => {
+    const i = l.indexOf('=');
+    if (i > 0) m[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+  });
+  return m;
+}
+
+/* parse wifidiag api output: sections + key=value + ap rows */
+function parseDiag(txt) {
+  const d = { ap: [], free: [], score: [], kv: {} };
+  let sec = '';
+  (txt || '').split('\n').forEach(l => {
+    if (!l) return;
+    if (l[0] === '[') { sec = l.slice(1, -1); return; }
+    if (l.startsWith('ap ')) {
+      const f = l.slice(3).split('|');
+      d.ap.push({ ssid: f[0], freq: +f[1], ch: +f[2], rssi: +f[3], age: +f[4], dfs: +f[5] });
+      return;
     }
-  } catch (e) { /* keep default */ }
+    if (l.startsWith('sc ')) {
+      const f = l.slice(3).split('|');
+      d.score.push({ ch: +f[0], load: +f[1], co: +f[2], adj: +f[3], dfs: +f[4], seen: +f[5] });
+      return;
+    }
+    const i = l.indexOf('=');
+    if (i <= 0) return;
+    const k = l.slice(0, i), v = l.slice(i + 1);
+    if (sec === 'congestion') d.free.push({ ch: k.replace('ch',''), n: +v });
+    d.kv[k] = v;
+  });
+  d.free.sort((a, b) => a.n - b.n);
+  return d;
 }
 
-function setOk(el, ok, text) {
-  el.textContent = text;
-  el.className = 'v ' + (ok ? 'ok' : 'bad');
+function qcls(r) {
+  if (r >= -50) return 'ok';
+  if (r >= -65) return 'warn';
+  return 'bad';
 }
 
-async function refresh() {
+let lastDiag = null;
+
+async function loadDiag() {
+  const r = await run('sh ' + MGR + ' wifi api 2>&1');
+  if (r === null) return;
+  const d = parseDiag(r);
+  lastDiag = d;
+  const kv = d.kv;
+
+  /* overview */
+  setV($('o-ssid'), kv.ssid || '未连接');
+  const f = +(kv.best_freq || 0);
+  const ch = f ? (f <= 2500 ? ((f == 2484) ? 14 : Math.floor((f - 2407) / 5)) : Math.floor((f - 5000) / 5)) : 0;
+  /* the connected link is not the same thing as the strongest neighbour */
+  const cf = +(kv.freq || 0);
+  setV($('o-freq'), cf ? (cf + ' MHz / ch ' + (kv.conn_ch || '?')) : '—');
+  const cr = +(kv.rssi || 0);
+  setV($('o-rssi'), cr ? (cr + ' dBm · ' + (kv.conn_quality || '')) : '—', cr ? qcls(cr) : '');
+  setV($('o-link'), kv.link_mbps ? (kv.link_mbps + ' Mbps') : '—');
+  setV($('o-std'), kv.standard ? ('Wi-Fi ' + kv.standard) : '—');
+
+  setV($('o-total'), kv.total || 0);
+  setV($('o-24'), kv.n24 || 0);
+  setV($('o-5'), kv.n5 || 0);
+  setV($('o-dfs'), kv.ndfs || 0, +(kv.ndfs||0) > 0 ? 'ok' : '');
+  $('o-note').textContent = kv.note || '';
+
+  const top = d.score.length ? d.score[0].load : 0;
+  $('o-free').innerHTML = d.score.slice(0, 6).map(s => {
+    const pct = top > 0 ? Math.max(2, Math.round(100 * s.load / top)) : 2;
+    const tag = s.dfs ? '<span class="tag dfs">DFS</span>' :
+                (s.ch >= 149 ? '<span class="tag u3">U3</span>' : '');
+    return `<tr><td>${s.ch}</td><td class="n">${s.load}</td>
+      <td class="n">${s.co}</td><td class="n">${s.adj}</td>
+      <td style="width:38%">${tag}<div class="bar"><i style="width:${pct}%"></i></div></td></tr>`;
+  }).join('') || '<tr><td>—</td></tr>';
+  setV($('o-pick'), (kv.best_ch && kv.best_ch !== 'none') ? ('ch ' + kv.best_ch) : '无数据',
+       (kv.best_ch && kv.best_ch !== 'none') ? 'ok' : 'bad');
+
+  /* link freshness + L3 */
+  const age = +(kv.age_max || 0);
+  setV($('n-age'), kv.aps ? (age + ' 秒前 · ' + kv.aps + ' AP') : '—',
+       kv.aps ? (age <= 20 ? 'ok' : 'warn') : '');
+  setV($('n-gw'), (kv.gw && kv.gw !== 'none') ? kv.gw : '未获取');
+  const loss = kv.loss;
+  const hasLoss = loss !== undefined && loss !== 'none';
+  setV($('n-loss'), hasLoss ? (loss + '%') : '—', hasLoss ? (+loss === 0 ? 'ok' : 'bad') : '');
+  setV($('n-rtt'), (kv.gw_rtt && kv.gw_rtt !== 'none') ? (kv.gw_rtt + ' ms') : '—',
+       (kv.gw_rtt && kv.gw_rtt !== 'none') ? (+kv.gw_rtt <= 10 ? 'ok' : 'warn') : '');
+  const dns = kv.dns_l3 || kv.dns;
+  setV($('n-dns'), dns === 'ok' ? '正常' : (dns === 'fail' ? '失败' : '未知'),
+       dns === 'ok' ? 'ok' : (dns === 'fail' ? 'bad' : ''));
+  setV($('n-roam'), +(kv.multi || 0) > 0 ? (kv.multi + ' 个 SSID') : '无',
+       +(kv.multi || 0) > 0 ? 'ok' : '');
+
+  $('o-best').innerHTML = d.ap.slice(0, 5).map(a =>
+    `<tr><td>${a.ssid || '(隐藏)'}</td><td>${a.ch}</td>
+     <td class="n ${qcls(a.rssi)}">${a.rssi}</td></tr>`).join('') || '<tr><td>—</td></tr>';
+
+  /* channel page */
+  $('ap-count').textContent = (kv.total || 0) + ' AP';
+  $('ap-rows').innerHTML = d.ap.slice(0, 40).map(a => {
+    const t = a.dfs ? '<span class="tag dfs">DFS</span>' :
+              (a.ch >= 149 ? '<span class="tag u3">UNII-3</span>' : '<span class="tag">普通</span>');
+    return `<tr><td>${a.ssid || '(隐藏)'}</td><td>${a.ch}</td><td>${a.freq}</td>
+            <td class="n ${qcls(a.rssi)}">${a.rssi}</td><td>${t}</td></tr>`;
+  }).join('') || '<tr><td>—</td></tr>';
+  setV($('d-ndfs'), (kv.ndfs || 0) + ' 个', +(kv.ndfs||0) > 0 ? 'ok' : 'bad');
+  setV($('d-ch'), (kv.dfs_ch || '').trim() || '无');
+
+  /* country page */
+  setV($('c-5g'), (kv.n5 || 0) + ' 个');
+  setV($('c-unii2c'), (kv.ndfs || 0) + ' 个', +(kv.ndfs||0) > 0 ? 'ok' : 'bad');
+  setV($('c-unii3'), (kv.nu3 || 0) + ' 个');
+}
+
+async function loadStatus() {
   const r = await run('sh ' + MGR + ' status');
   if (r === null) return;
-  const m = {};
-  r.split('\n').forEach(l => {
-    const i = l.indexOf('=');
-    if (i > 0) m[l.slice(0, i).trim()] = l.slice(i + 1).trim();
-  });
-  setOk($('s-mtalk'), +m.mtalk > 0, (m.mtalk || 0) + ' 条');
-  setOk($('s-github'), +m.github > 0, (m.github || 0) + ' 条');
-  setOk($('s-user'), true, (m.user || 0) + ' 条');
-  setOk($('s-mount'), m.mounted === '1', m.mounted === '1' ? '已挂载' : '未挂载');
-  setOk($('s-cc'), true, m.cc || 'US');
-  const cur = m.cur_cc || '';
-  setOk($('s-curcc'), cur.toUpperCase() === (m.cc || 'US').toUpperCase(), cur || '未获取');
+  const m = parseKV(r);
 
-  $('t-mtalk').checked = m.use_mtalk !== '0';
-  $('t-github').checked = m.use_github !== '0';
-  $('cc-input').value = m.cc || 'US';
-  await refreshDiag();
+  setV($('h-probed'), (m.probed || 0) + ' 条');
+  setV($('h-user'), (m.user || 0) + ' 条');
+  setV($('h-entries'), (m.entries || 0) + ' 条');
+  setV($('h-mount'), m.mounted === '1' ? '已挂载' : '未挂载', m.mounted === '1' ? 'ok' : 'bad');
+  $('h-use').checked = m.use_probed !== '0';
+  $('h-timeout').value = m.timeout || 3;
+  $('h-threads').value = m.threads || 8;
+
+  const want = (m.cc || 'US').toUpperCase();
+  const cur = (m.cur_cc || '').toUpperCase();
+  setV($('c-want'), want);
+  setV($('c-cur'), cur || '未获取', cur ? (cur === want ? 'ok' : 'warn') : 'bad');
+  $('c-input').value = want;
 }
 
-async function loadUserHosts() {
+async function loadManual() {
   const r = await run('base64 -w0 ' + MODDIR + '/user-hosts 2>/dev/null');
   if (!r) return;
-  const b64 = r.trim().split('\n').pop();
-  if (!b64) return;
-  try {
-    $('user-hosts').value = decodeURIComponent(escape(atob(b64)));
-  } catch (e) {
-    $('user-hosts').value = '';
-  }
+  const b = r.trim().split('\n').pop();
+  if (!b) return;
+  try { $('h-manual').value = decodeURIComponent(escape(atob(b))); } catch (e) { $('h-manual').value = ''; }
 }
 
-async function busy(btn, fn) {
-  btn.disabled = true;
-  try { await fn(); } finally { btn.disabled = false; await refresh(); }
+async function refreshAll() { await loadStatus(); await loadDiag(); }
+
+function busy(btn, fn) {
+  return async () => {
+    btn.disabled = true;
+    try { await fn(); } finally { btn.disabled = false; await refreshAll(); }
+  };
 }
 
-$('btn-refresh').onclick = e => busy(e.target, async () => {
-  out('正在从云端刷新…');
-  const mt = $('t-mtalk').checked ? 1 : 0;
-  const gh = $('t-github').checked ? 1 : 0;
+/* ---------- actions ---------- */
+$('btn-scan').onclick = busy($('btn-scan'), async () => {
+  out('扫描中…');
+  const r = await run('cmd wifi start-scan; sleep 6; sh ' + MGR + ' wifi api 2>&1');
+  out(r === null ? '无法执行' : '扫描完成');
+});
+
+$('h-use').onchange = async () => {
+  const v = $('h-use').checked ? 1 : 0;
+  await run('sed -i "s/^USE_PROBED=.*/USE_PROBED=' + v + '/" ' + MODDIR + '/config');
+  await loadStatus();
+};
+
+$('h-probe').onclick = busy($('h-probe'), async () => {
+  const t = clamp(+$('h-timeout').value, 1, 20);
+  const n = clamp(+$('h-threads').value, 1, 32);
+  $('h-timeout').value = t; $('h-threads').value = n;
+  out('探测中（超时 ' + t + 's，' + n + ' 线程）…');
   const r = await run(
-    'sed -i "s/^USE_MTALK=.*/USE_MTALK=' + mt + '/;s/^USE_GITHUB=.*/USE_GITHUB=' + gh + '/" ' + MODDIR + '/config\n' +
-    'sh ' + MGR + ' refresh 2>&1');
-  out(r === null ? '无法执行' : (r || '(无输出)'));
-  await loadUserHosts();
+    'sed -i "s/^PROBE_TIMEOUT=.*/PROBE_TIMEOUT=' + t + '/;/^PROBE_THREADS=.*/PROBE_THREADS=' + n + '/" ' + MODDIR + '/config\n' +
+    'sh ' + MGR + ' probe --print 2>&1');
+  out(r === null ? '无法执行' : r);
 });
 
-$('btn-cc').onclick = e => busy(e.target, async () => {
-  const v = ($('cc-input').value || '').trim().toUpperCase();
-  if (!/^[A-Z]{2}$/.test(v)) { out('请输入两位国家码，如 US / CN / JP'); return; }
-  out('正在设置国家码 ' + v + ' …');
-  const r = await run('sh ' + MGR + ' set-cc ' + v + ' 2>&1');
-  out(r === null ? '无法执行' : (r || '(无输出)'));
+$('h-onlyprobe').onclick = busy($('h-onlyprobe'), async () => {
+  out('仅探测…');
+  const r = await run('sh ' + MODDIR + '/probe.sh --print 2>&1');
+  out(r === null ? '无法执行' : r);
 });
 
-$('btn-cc-default').onclick = e => busy(e.target, async () => {
-  out('恢复自动国家码…');
-  const r = await run('cmd wifi force-country-code disabled 2>&1; echo "--- done ---"');
-  out(r === null ? '无法执行' : (r || '(无输出)'));
-});
-
-$('btn-save-user').onclick = e => busy(e.target, async () => {
-  const raw = $('user-hosts').value || '';
-  /* base64 keeps quotes / newlines / unicode intact through the shell */
-  const b64 = btoa(unescape(encodeURIComponent(raw)));
-  out('正在保存手动条目…');
+$('h-save').onclick = busy($('h-save'), async () => {
+  const b64 = btoa(unescape(encodeURIComponent($('h-manual').value || '')));
+  out('保存中…');
   const r = await run(
     'echo ' + b64 + ' | base64 -d > ' + MODDIR + '/user-hosts\n' +
-    'sh ' + MGR + ' apply 2>&1\n' +
-    'echo "--- done ---"');
-  out(r === null ? '无法执行' : (r || '(无输出)'));
+    'sh ' + MGR + ' apply 2>&1');
+  out(r === null ? '无法执行' : (r || '已应用'));
 });
 
-async function refreshDiag() {
-  const r = await run('sh ' + MGR + ' cc-check');
-  if (r === null) return;
-  const m = {};
-  r.split('\n').forEach(l => {
-    const i = l.indexOf('=');
-    if (i > 0) m[l.slice(0, i).trim()] = l.slice(i + 1).trim();
-  });
-  const want = (curCC() || 'US').toUpperCase();
-  const fw = (m.framework || '').toUpperCase();
-  setOk($('d-fw'), fw === want, fw && fw !== 'UNKNOWN' ? fw : '未获取');
-  const sup = (m.supplicant || '').toUpperCase();
-  setOk($('d-kernel'), sup === want, sup && sup !== 'UNSET' ? sup : '未设置');
-  const c5 = +(m.bss5g || 0), cu = +(m.unii2c || 0), c3 = +(m.unii3 || 0);
-  setOk($('d-5g'), c5 > 0, c5 + ' 个');
-  setOk($('d-unii'), cu > 0, cu + ' 个');
-  setOk($('d-u3'), c3 > 0, c3 + ' 个');
-}
-
-function curCC() {
-  return ($('s-cc') && $('s-cc').textContent || 'US').trim();
-}
-
-$('btn-diag').onclick = e => busy(e.target, async () => {
-  out('正在运行诊断…');
-  const r = await run('sh ' + MGR + ' diagnose 2>&1; echo; cat ' + MODDIR + '/diagnose.log 2>/dev/null | head -80');
-  out(r === null ? '无法执行' : (r || '(无输出)'));
-  await refreshDiag();
+$('h-remount').onclick = busy($('h-remount'), async () => {
+  const r = await run('sh ' + MGR + ' remount 2>&1');
+  out(r === null ? '无法执行' : (r || '已重新挂载'));
 });
 
-$('btn-apply').onclick = e => busy(e.target, async () => {
-  out('正在应用并重挂…');
-  const r = await run('sh ' + MGR + ' apply 2>&1; echo "--- done ---"');
-  out(r === null ? '无法执行' : (r || '(无输出)'));
+$('c-set').onclick = busy($('c-set'), async () => {
+  const v = ($('c-input').value || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(v)) { out('请输入两位国家码'); return; }
+  out('设置 ' + v + ' …');
+  const r = await run('sh ' + MGR + ' set-cc ' + v + ' 2>&1');
+  out(r === null ? '无法执行' : r);
 });
+
+$('c-auto').onclick = busy($('c-auto'), async () => {
+  const r = await run('cmd wifi force-country-code disabled 2>&1; echo done');
+  out(r === null ? '无法执行' : r);
+});
+
+$('c-diag').onclick = busy($('c-diag'), async () => {
+  out('运行诊断…');
+  const r = await run('sh ' + MGR + ' diagnose 2>&1 | head -60');
+  out(r === null ? '无法执行' : r);
+});
+
+function clamp(v, a, b) { return isNaN(v) ? a : Math.max(a, Math.min(b, v)); }
 
 (async function init() {
   if (!hasKsu()) {
-    out('未检测到 KernelSU WebUI 接口。请在 KernelSU 管理器中打开本模块的 WebUI；\n' +
-        '命令行用法：sh ' + MGR + ' status');
+    out('未检测到 KernelSU WebUI 接口。请从管理器打开本模块的 WebUI。\n' +
+        '命令行：sh ' + MGR + ' wifi api');
     return;
   }
   await resolveModDir();
   out('就绪 · ' + MODDIR);
-  await refresh();
-  await loadUserHosts();
-  await refreshDiag();
+  await refreshAll();
+  await loadManual();
 })();
 </script>
 </body>
