@@ -460,17 +460,21 @@ su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh cc-check'      # 只看国
 su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh cc-check'
 ```
 
-输出示例（卡在固件层）：
+输出字段（`unii2a` / `unii2c` / `unii3` 是按**信道号**分桶的，不是按频率区间
+—— 5725 MHz 正好是 ch149，用频率判定会把 UNII-3 算成 UNII-2C）：
 
 ```
-framework=US     # 框架认为是美国
-kernel=00        # 内核却是"世界域"，最典型
-unii2c=no        # PHY 根本没登记 100-144
-dfs=no           # 扫描也看不到 DFS AP
-config=US
+framework=US     # 框架认为的国家码
+kernel=00        # 内核 regdom（能读到才有），00 = 世界域，最常见的坏情况
+bss5g=40         # 扫到的 5GHz AP 数
+unii2c=1         # 扫到 ch100-144 的 AP 数，这是判断 DFS 能否使用的关键指标
+unii2a=6         # 扫到 ch52-64 的 AP 数
+unii3=20         # 扫到 ch149+ 的 AP 数
+dfs_total=7      # 上两个 DFS 段之和
+config=US        # 模块配置里写的值
 ```
 
-若 `unii2c=no`，说明固件的信道表里压根没有 UNII-2C，
+若 `unii2c=0`，说明固件的信道表里压根没有 UNII-2C，
 **没有任何国家码设置能让这些信道出现** —— 这是认证与射频能力的硬边界，不是软件开关。
 
 完整四层转储（含 `iw reg get`、PHY 信道表、vendor ini）：

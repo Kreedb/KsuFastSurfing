@@ -63,15 +63,31 @@ say "bss_total=$n_all"
 if [ "$n_all" = "0" ]; then
   say "  (no cached results - run: cmd wifi start-scan, then re-run this)"
 fi
-# 5GHz = 4900-5895, UNII-2C (ch100-144) = 5470-5725
+# 5GHz = 4900-5895. UNII-2C is ch100-144 only; ch52-64 is UNII-2A, a different
+# band with different rules. Bucketing must use the channel number, not a
+# frequency range: 5725 MHz is exactly ch149 (UNII-3), so "freq <= 5725" counted
+# the first UNII-3 channel as UNII-2C.
 n_5g=$(echo "$SR" | awk 'NR>1 && $2+0>=4900 && $2+0<=5895 {c++} END{print c+0}')
-n_unii2c=$(echo "$SR" | awk 'NR>1 && $2+0>=5470 && $2+0<=5725 {c++} END{print c+0}')
+n_unii2a=$(echo "$SR" | awk '
+  NR>1 && $2+0>=4900 && $2+0<=5895 { c=int(($2+0-5000)/5); if (c>=52 && c<=64) n++ }
+  END { print n+0 }')
+n_unii2c=$(echo "$SR" | awk '
+  NR>1 && $2+0>=4900 && $2+0<=5895 { c=int(($2+0-5000)/5); if (c>=100 && c<=144) n++ }
+  END { print n+0 }')
+n_unii3=$(echo "$SR" | awk '
+  NR>1 && $2+0>=4900 && $2+0<=5895 { c=int(($2+0-5000)/5); if (c>=149) n++ }
+  END { print n+0 }')
 say "bss_5ghz=$n_5g"
+say "bss_unii2a=$n_unii2a"
 say "bss_unii2c=$n_unii2c"
+say "bss_unii3=$n_unii3"
 if [ "$n_unii2c" -gt 0 ] 2>/dev/null; then
-  say "  UNII-2C APs seen:"
-  echo "$SR" | awk 'NR>1 && $2+0>=5470 && $2+0<=5725 {printf "    %s MHz  %s\n", $2, $5}' | head -10 >> "$OUT"
-  echo "$SR" | awk 'NR>1 && $2+0>=5470 && $2+0<=5725 {printf "    %s MHz  %s\n", $2, $5}' | head -10 | sed 's/^/  /'
+  say "  UNII-2C (ch100-144) APs seen:"
+  echo "$SR" | awk '
+    NR>1 && $2+0>=4900 && $2+0<=5895 {
+      c = int(($2+0 - 5000) / 5)
+      if (c >= 100 && c <= 144) printf "    %s MHz  ch%d  %s\n", $2, c, $5
+    }' | head -10 | tee -a "$OUT" | sed 's/^/  /'
 fi
 say "freq_list=$(echo "$SR" | awk 'NR>1 && $2 ~ /^[0-9]+$/ {print $2}' | sort -un | tr '\n' ' ')"
 

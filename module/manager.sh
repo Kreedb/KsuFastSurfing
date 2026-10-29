@@ -253,13 +253,14 @@ case "$1" in
         if (f <= 2500) next                      # 2.4G is not interesting here
         if (f <= 5895) c = int((f - 5000) / 5); else c = int((f - 5950) / 5)
         n++
-        if (c >= 52 && c <= 64)                dfs++
+        if (c >= 52 && c <= 64)                { dfs++; u2a++ }
         if (c >= 100 && c <= 144)              { dfs++; u2c++ }
         if (c >= 149)                          u3++
       }
       END {
         printf "bss5g=%d\n", n + 0
         printf "unii2c=%d\n", u2c + 0
+        printf "unii2a=%d\n", u2a + 0
         printf "unii3=%d\n", u3 + 0
         printf "dfs_total=%d\n", dfs + 0
       }'
