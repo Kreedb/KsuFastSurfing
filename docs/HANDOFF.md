@@ -100,7 +100,7 @@ c-set
 - 概览「链路与网络」新增本机地址 / 子网掩码 / 出口 IP / 出口 DNS / DNS 判定，
   下方新增路由表卡片；出网检查由 `ping github.com` 换成 HTTPS GET 回显页
 - hosts 页：默认显示设备上实际生效的只读 hosts，点「编辑」才展开 `user-hosts`
-- hosts 页新增 DNS 解析卡（域名 / 服务器 / 次数，默认 `google.com` / `8.8.8.8` / 64）
+- 国家码并入网络配置页，5GHz 可用性与详细输出面板删除
 
 **移除**
 - 扫描触发（`cmd wifi start-scan` 在目标机型上被 `ScanRequestProxy` 静默丢弃，
@@ -118,13 +118,11 @@ c-set
 
 | 项 | 结果 |
 |---|---|
-| `node tests/test-diag.js` | 通过 |
-| `node tests/test-hosts.js` | 通过 |
-| `node tests/test-status.js` | 通过（含“零 `.sh` 命令”断言） |
+| `node tests/run.js` | 通过（三套并行，约 0.4 秒；含“零 `.sh` 命令”断言） |
 | Playwright 渲染 | 概览 / hosts / 导航非 sticky / 无 JS 报错，均通过 |
 | 桥接并发 | 页面限制 6 条在飞；真机桥接是否支持并发待验证 |
-| `busybox ash -n module/*.sh build.sh` | 通过 |
-| `./build.sh` | 通过，产物 11 个文件 |
+| `dash -n module/*.sh build.sh`（由 `./build.sh` 执行） | 通过 |
+| `./build.sh` | 通过（内置测试 + 产物校验），11 个文件 |
 | zip 内 `index.html` 自包含 | 是，无 `<script src=` |
 | zip 内是否含 `webroot/diag.js` | 否 |
 | zip 内是否含已删除脚本 | 否 |
@@ -138,7 +136,7 @@ c-set
 - 控制台只保留 800 行；长输出只显示前 6 行摘要
 - 页面写文件用单条命令（`printf … | base64 -d > file`），hosts 极大时可能触及命令行长度
 - AP 列表一次性渲染全部条目，AP 很多时首次打开概览会慢（P3 未做）
-- 出网检查依赖 `curl`；DNS 解析依赖 `nc -u`，精简 ROM 可能都没有，失败会明确报出
+- 出网检查依赖 `curl`，精简 ROM 可能没有，失败会明确报出
 - 回显页是第三方服务，域名 `nstool.laiqukankan.com` 失效时该行显示“出网失败”，
   其余卡片不受影响
 
@@ -153,7 +151,7 @@ c-set
 5. 概览：本机地址 / 掩码 / 出口 IP / 出口 DNS / 路由表都有值
 6. 概览：AP 列表按信号排序，页面不发出任何扫描请求
 7. hosts：默认只读显示生效内容，点「编辑」能改、保存后自动收起
-8. hosts：DNS 解析 64 次，返回多个地址且带命中占比；控制台无 `/tmp` 写入
+8. 概览信道表：38 个信道全列，推荐信道在信道号后带 ★ 且整行高亮
 9. 国家码：应用后 `cmd wifi get-country-code` 与页面一致；重启后仍是配置值
 
 ### 优先级 P2：验证后再决定
@@ -191,12 +189,8 @@ cd <repo>
 git log --oneline -5
 git status --short
 
-# 改完先跑
+# 改完先跑（语法、守卫、三套测试、打包、产物校验，全在这一条里）
 ./build.sh
-for f in module/*.sh; do busybox ash -n "$f"; done
-node tests/test-diag.js
-node tests/test-hosts.js
-node tests/test-status.js
 ```
 
 产物在 `dist/`。真机测试通过前不要动 `module.prop` 的版本号，不要打 tag。

@@ -6,7 +6,7 @@
 |---|---|---|
 | `python3` | 打包时内联 `diag.js`、写 zip 权限位 | 构建必需 |
 | `node` | 跑回归测试 | 不参与打包 |
-| `busybox` | `busybox ash -n` 语法检查 | 与 Android 上的 shell 对齐 |
+| `dash` | `dash -n` 语法检查 | POSIX，与 Android 的 ash 足够接近，任何发行版自带 |
 | `zip` | 不需要 | `build.sh` 直接用 Python `zipfile` 写 POSIX 权限位 |
 
 ## 构建
@@ -35,10 +35,13 @@
 ## 测试
 
 ```sh
-node tests/test-diag.js
-node tests/test-hosts.js
-node tests/test-status.js
+node tests/run.js              # 三套并行，约 0.4 秒
+node tests/run.js --verbose    # 附带每个用例的输出
+node tests/test-diag.js        # 也可以单独跑某一份
 ```
+
+`tests/run.js` 把三份测试作为独立进程**同时**启动，墙钟时间取最慢的一份而不是累加；
+任一份失败返回 1，且只打印失败那份的 `FAIL` 行，避免通过的噪音盖住问题。
 
 ### test-diag.js
 
@@ -88,22 +91,24 @@ node tests/test-status.js
 
 ```sh
 ./build.sh
-for f in module/*.sh; do busybox ash -n "$f"; done
-node tests/test-diag.js
-node tests/test-hosts.js
-node tests/test-status.js
-
-# 结构守卫：被删掉的脚本不能回来
-for f in manager.sh collect.sh probe.sh diagnose.sh capacity.sh action.sh service.sh; do
-  test ! -e "module/$f" || echo "unexpected module/$f"
-done
 ```
+
+一条命令做完所有事，失败即中止且不产出 zip：
+
+1. `dash -n` 检查 `module/*.sh` 与 `build.sh`
+2. 拦截被删除的 6 个脚本复活、页面里出现 `MODDIR + '/...sh'`
+3. 校验 `module.prop` 必填字段与 id 首字母
+4. 跑 `tests/run.js`（三套并行，约 0.4 秒）
+5. 暂存副本里内联 `diag.js`、打包
+6. **校验产物本身**：无第二个 `diag.js`、无 `<script src=`、页面调用的函数齐全
+
+只改打包逻辑、不想跑测试时用 `./build.sh --no-test`。
 
 ## 脚本规范
 
 模块里只剩三个生命周期钩子，规范相应收窄：
 
-- Shebang 一律 `#!/system/bin/sh`，用 `busybox ash -n` 校验（Android 没有 bash）
+- Shebang 一律 `#!/system/bin/sh`，用 `dash -n` 校验（Android 没有 bash）
 - `MODDIR=${0%/*}` 足够：三个钩子都由管理器以绝对路径调用
 - 不假设 `curl` / `wget` / `iw` / `getent` 存在，逐项 `command -v` 降级
 - 修改挂载前先 `umount`，挂载必须幂等
@@ -140,17 +145,15 @@ done
 
 ## CI
 
-`.github/workflows/build.yml` 在 push / PR 时：
+`.github/workflows/build.yml` 只做四件事：
 
-1. `busybox ash -n` 检查所有脚本
-2. 校验 `module.prop` 必填字段
-3. `./build.sh`
-4. `node tests/test-hosts.js`（合并规则，不需要设备）
-5. 检查被删除的脚本没有回来；页面不执行 `MODDIR + '/...sh'`
-6. 跑 `test-diag.js` 与 `test-status.js`
-7. 校验包内 `index.html` 自包含、没有 `webroot/diag.js`、页面调用的函数都存在
-8. `git diff --exit-code` 确认构建没有改源文件
-9. 上传 zip artifact
+1. checkout + `setup-node`
+2. `./build.sh`（上面那 6 步全部在这里，CI 与本地跑的是同一份逻辑）
+3. `git diff --exit-code -- module/ tests/` 确认构建没有改源文件
+4. 上传 zip；只有推 `v*` tag 时才创建 Release
+
+CI 里不再有第二份检查清单——以前两边各写一遍，改一边忘另一边就会漏。
+`dash -n` 取代 `busybox-static` 的 apt 安装，省掉每次跑 CI 的 20 秒。
 
 只有推送 `v*` tag 时才会创建 Release。日常 push main 只跑构建与测试。
 
@@ -167,6 +170,6 @@ done
 - 模块元数据：`module/module.prop`
 - 运行配置：`module/config`（只有 `CC`）
 - 页面与数据层：`module/webroot/`
-- 新增生命周期文件要同时改：`customize.sh` 权限表、`build.sh` 的 `EXEC` 集合、
-  CI 的脚本检查
+- 新增生命周期文件要同时改：`customize.sh` 权限表、`build.sh` 的 `EXEC` 集合
+  （CI 复用同一份 `build.sh`，不需要再改第二处）
 - 新增运行时文件要确认不会被 `build.sh` 打进包（加入 `SKIP`）

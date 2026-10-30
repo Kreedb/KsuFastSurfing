@@ -1,7 +1,7 @@
 # WebUI
 
 页面是纯静态 HTML，无框架、无构建期依赖。`index.html` 负责结构、样式、交互与控制台；
-`diag.js` 负责解析、合并、采集与诊断。打包时把 `diag.js` 内联进
+`diag.js` 负责解析、合并与采集。打包时把 `diag.js` 内联进
 `dist` 副本，仓库里两者保持分离。
 
 **页面是唯一的控制面。** 模块里没有 `manager.sh` / `collect.sh` / `probe.sh` /
@@ -131,16 +131,18 @@ st(text, {warn: true})   // 警告
 - 每个动作自己决定刷新什么：保存后只读 `status`，改国家码后只读一次 `measure()`
 - `userActed` 守卫：用户点过任何按钮后，启动流程不再把状态改成“就绪”
 
-## 四个选项卡
+## 三个选项卡
 
 | 选项卡 | 主要元素 | 数据来源 |
 |---|---|---|
-| 概览 | 链路、周边计数、建议信道、本机地址 / 网关 / 掩码 / 丢包 / 出口 IP / 出口 DNS、路由表、按信号排序的 AP 列表、UNII 分带 | `measure()` |
-| hosts | 状态、只读 hosts 视图、折叠编辑框、保存按钮、DNS 解析卡 | 读文件 + `h-save` / `d-run` handler |
-| 国家码 | 期望 / 当前、输入框、应用 / 恢复自动 / 诊断 | 读文件 + `diagnoseLayers()` |
+| 概览 | 链路、周边计数、全信道干扰表、本机地址 / 网关 / 掩码 / 丢包 / 出口 IP / 出口 DNS、路由表、按信号排序的 AP 列表、UNII 分带 | `measure()` |
+| 网络配置 | hosts 状态、只读视图 + 折叠编辑框、保存按钮、国家码 | 读文件 + `h-save` / `c-set` handler |
 | 控制台 | 命令、退出码、耗时、输出摘要 | `exec()` |
 
 ### AP 列表的渲染
+
+信道表在概览页，按信道号顺序列出全部候选信道（38 个），卡片内限高 320px 滚动，
+表头 sticky；推荐信道在信道号后加 ★，整行浅色高亮。
 
 AP 列表在概览页，按信号从强到弱。每个 SSID 一组：名称居中，下面逐行列出该名称下每个射频的
 `BSSID / 信道 / 频率 / RSSI / 类型`。同名多射频（mesh、多频合一）并排显示，
@@ -162,34 +164,6 @@ SSID 是不可信输入：进 DOM 前必须 `esc()`。一个名为 `<img src=x o
 
 页面不做域名探测：`curl` 探测依赖外部网络，产出还只是一个“当前线路最快”的地址，
 对 CDN 域名并没有稳定意义。需要哪个地址就填哪个，页面只负责合并、写入和挂载。
-
-### DNS 解析
-
-hosts 页下方的独立卡片，用来观察一个域名在某个 DNS 服务器上到底返回多少地址。
-
-| 输入 | 默认 |
-|---|---|
-| 域名 | `google.com` |
-| DNS 服务器 | `8.8.8.8` |
-| 次数 | `64`（1–256） |
-
-实现直接沿用 `dns.sh` 的思路，但把 shell + awk 换成了页面 JS：
-
-```
-dnsQuery()      域名 → DNS 线格式报文（长度前缀 + QTYPE=A/QCLASS=IN），base64 一次
-dnsOne()        printf %s <b64> | base64 -d | timeout N nc -u -w N <server> 53
-                  | od -An -tx1 | tr -d " \\n"
-dnsParseHex()   十六进制 → 跳过压缩指针/CNAME → 取 A 记录
-dnsBurst()      并发 8 路，去重计数
-```
-
-结果按**出现次数**排序，并显示 `命中数 / 总次数`——单次查询只会拿到轮转组里的一个地址，
-64 次才看得出 CDN 的分布。
-
-**不落盘**。报文以 base64 放在命令行里，`base64 -d` 直接喂给 `nc` 的 stdin；
-旧版先在 `/tmp` 写一个 `.bin` 再读，除了占 /data 空间，还要在异常退出时清理。
-每个查询同时受 `nc -w` 和 `timeout N` 约束：toybox 的 `nc` 会按 `-w` 退出，
-busybox 的个别版本会等 socket 关闭，多一层 `timeout` 才不会占住桥接槽位。
 
 ### 保存
 
@@ -237,13 +211,6 @@ root shell 不在其列。连发三次、关扫描节流、`scan-always-availabl
 恢复自动
   └─ cmd wifi force-country-code disabled
 ```
-
-## 四层诊断
-
-`diagnoseLayers()` 在原页面里组装报告：framework 的 Country Code 行、
-`settings get global wifi_country_code`、supplicant conf、`iw reg get`、
-扫描分带、vendor cfg、当前链路，最后生成 verdict。结果只写详情面板与控制台，
-不再写 `diagnose.log`。
 
 ## 打包
 

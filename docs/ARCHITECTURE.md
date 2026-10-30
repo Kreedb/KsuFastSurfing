@@ -60,7 +60,6 @@ uninstall.sh    ──▶ 关闭国家码、卸载 bind mount
 | 保存并应用 | `h-save` handler | 是（写文件 + 挂载） |
 | 应用国家码 | `c-set` handler | 是（写配置 + 属性 + 运行时） |
 | 恢复自动 | `c-auto` handler | 是（`cmd wifi force-country-code disabled`） |
-| 四层诊断 | `diagnoseLayers()` | 否 |
 
 ## hosts 管线
 

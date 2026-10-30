@@ -19,7 +19,7 @@ const api = new Function('exec', src + `
   return { parseScan, parseLink, analyse, scoreChannels, chanOf, isDfs, uniiOf,
            rssiBand, b64bytes, parseNet, routeText, mergeHosts,
            countHosts, setKV, parseCC, parseEcho, prefixToMask, parseAddr,
-           parseRoutes, dnsQuery, dnsParseHex };
+           parseRoutes };
 `)(async () => ({ stdout: '', stderr: '', errno: 0 }));
 
 let failures = 0;
@@ -309,35 +309,6 @@ console.log('== mask and routes ==');
   eq('on-link row has no gateway', rows[1].gw, '');
   eq('source kept where present', rows[1].src, '192.168.1.13');
   eq('three rows', rows.length, 3);
-}
-
-/* ---------- 9e. DNS wire format ---------- */
-console.log('== dns burst ==');
-{
-  /* Byte-for-byte against the same query dns.sh builds with od/awk. */
-  eq('google.com query bytes',
-     Buffer.from(api.dnsQuery('google.com', 1)).toString('hex'),
-     '00010100000100000000000006676f6f676c6503636f6d0000010001');
-
-  /* Labels longer than 63 bytes cannot be encoded; they are dropped instead of
-     producing a malformed packet. */
-  const long = Buffer.from(api.dnsQuery('a'.repeat(70) + '.com', 1)).toString('hex');
-  eq('over-long label is skipped', /03636f6d0000010001$/.test(long), true);
-
-  /* Shaped like a real reply, with a compression pointer in the answer name. */
-  const reply = '12348180000100010000000003777777' + '0667697468756203636f6d0000010001' +
-                'c00c000100010000012c0004' + '14cd2c02';
-  eq('compressed answer decodes', api.dnsParseHex(reply), ['20.205.44.2']);
-  ok('a header-only reply yields nothing', api.dnsParseHex('123481800000000000000000').length === 0);
-
-  /* CNAME then A: the name walk must skip the first record's rdata and still
-     find the address behind it. */
-  const cname = '12348180000100020000000003777777' + '0667697468756203636f6d0000010001' +
-                'c00c000500010000012c0002' + 'c010' +
-                'c010000100010000012c0004' + '14cd2c02';
-  eq('address behind a cname', api.dnsParseHex(cname), ['20.205.44.2']);
-  eq('garbage is not a crash', api.dnsParseHex('zzzz'), []);
-  eq('empty is not a crash', api.dnsParseHex(''), []);
 }
 
 /* ---------- 10. SSID bytes survive the bridge ---------- */

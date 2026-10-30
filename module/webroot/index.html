@@ -47,6 +47,11 @@
   .hosts div span { display:block; }
   .hosts .n { font-size:19px; font-weight:700; }
   .hosts .l { font-size:10.5px; color:var(--dim); margin-top:2px; }
+  .chwrap { max-height:320px; overflow:auto; margin:0 -2px; }
+  .chwrap thead th { position:sticky; top:0; background:inherit; z-index:1;
+                     backdrop-filter:blur(2px); }
+  .star { color:#f0b429; margin-left:3px; font-size:11px; }
+  tr.rec td { background:rgba(240,180,41,.09); }
   .rt { font-size:12.5px; font-variant-numeric:tabular-nums; }
   .rt-h, .rt-r { display:grid; grid-template-columns:1.4fr 1fr .9fr; gap:6px; padding:5px 0;
                  border-bottom:1px solid var(--line); }
@@ -178,8 +183,7 @@
 
 <nav>
   <button id="tab-ov" class="on">概览</button>
-  <button id="tab-hs">hosts</button>
-  <button id="tab-cc">国家码</button>
+  <button id="tab-hs">网络配置</button>
   <button id="tab-con">控制台</button>
 </nav>
 
@@ -217,12 +221,15 @@
   </div>
 
   <div class="card">
-    <h2>建议信道 <span class="tag" id="o-pick">—</span></h2>
-    <table>
-      <thead><tr><th>ch</th><th class="n">干扰</th><th class="n">同信道</th><th class="n">邻道</th><th>备注</th></tr></thead>
+    <h2>信道干扰 <span class="tag" id="o-pick">—</span></h2>
+    <!-- All 38 settable channels is a long table on a phone; it scrolls inside
+         the card so the rest of the overview stays one flick away. -->
+    <div class="chwrap"><table>
+      <thead><tr><th>ch</th><th class="n">干扰</th><th class="n">同信道</th><th class="n">邻道</th><th>占用</th></tr></thead>
       <tbody id="o-free"></tbody>
-    </table>
-    <div class="muted">按加权干扰功率排序（同信道全权重，±4 邻道 1/4）。干扰为空信道也不推荐 DFS。</div>
+    </table></div>
+    <div class="muted">按信道号排列，全部可设信道都在这里。干扰按加权功率计算（同信道全权重，
+      ±4 邻道 1/4）；推荐信道在信道号后标 ★。DFS 信道标 DFS，149 以上标 U3。</div>
   </div>
 
   <div class="card">
@@ -289,27 +296,6 @@
   </div>
 
   <div class="card">
-    <h2>DNS 解析</h2>
-    <div class="grid3">
-      <label class="fld"><span>域名</span>
-        <input type="text" id="d-host" value="google.com" autocapitalize="none" spellcheck="false"></label>
-      <label class="fld"><span>DNS 服务器</span>
-        <input type="text" id="d-server" value="8.8.8.8" autocapitalize="none" spellcheck="false"></label>
-      <label class="fld"><span>次数</span>
-        <input type="number" id="d-count" value="64" min="1" max="256" step="1"></label>
-    </div>
-    <button class="act" id="d-run">开始解析</button>
-    <div class="row"><span class="k">独立 IP</span><span class="v" id="d-hits">—</span></div>
-    <div class="row"><span class="k">进度</span><span class="v" id="d-prog">—</span></div>
-    <div id="d-list" class="dnslist"></div>
-    <div class="muted">直接发 UDP 查询到指定服务器，每个返回的 A 记录按出现次数排序。
-      次数越多越能看到 CDN 轮转出的不同地址。</div>
-  </div>
-</section>
-
-<!-- ================= 国家码 ================= -->
-<section class="page" id="p-cc">
-  <div class="card">
     <h2>国家码</h2>
     <div class="row"><span class="k">配置</span><span class="v" id="c-want">—</span></div>
     <div class="row"><span class="k">当前 (框架)</span><span class="v" id="c-cur">—</span></div>
@@ -318,18 +304,7 @@
       <button class="act" id="c-set">应用</button>
       <button class="act alt" id="c-auto">恢复自动</button>
     </div>
-  </div>
-  <div class="card">
-    <h2>5GHz 可用性</h2>
-    <div class="row"><span class="k">扫到 5GHz AP</span><span class="v" id="c-5g">—</span></div>
-    <div class="row"><span class="k">扫到 100-144</span><span class="v" id="c-unii2c">—</span></div>
-    <div class="row"><span class="k">扫到 149-165</span><span class="v" id="c-unii3">—</span></div>
-    <button class="act alt" id="c-diag">运行完整诊断</button>
-    <div class="muted">改国家码只影响框架层。能否看到 DFS 信道取决于射频与固件，以扫描结果为准。</div>
-  </div>
-  <div class="card"><h2>详细输出</h2>
-    <div class="muted" style="margin:0 0 8px">所有选项卡的操作细节都在这里；顶部状态条只显示结论。</div>
-    <pre id="out">就绪</pre>
+    <div class="muted">写入 config / system.prop 并注入属性，再调框架与 iw。能否看到 DFS 信道取决于射频与固件，以扫描结果为准。</div>
   </div>
 </section>
 
@@ -427,10 +402,9 @@ function st(text, opt) {
                                  String(t.getMinutes()).padStart(2, '0');
 }
 
-/* Detail pane only. This must never touch the status bar: doing so meant the
-   raw output of a *successful* probe overwrote the summary with the first line
-   of a command's stdout, so the result looked like a failure. */
-const out = m => { $('out').textContent = m; };
+/* The separate detail panel is gone. Multi-line results go to the console,
+   which is where the reader already looks; this never touches the status bar. */
+const out = m => klog('info', String(m == null ? '' : m));
 
 function hasKsu() {
   return typeof ksu !== 'undefined' && ksu !== null && typeof ksu.exec === 'function';
@@ -540,8 +514,7 @@ async function resolveModDir() {
 }
 
 /* ---------- tabs ---------- */
-const TABS = [['tab-ov','p-ov'],['tab-hs','p-hs'],
-              ['tab-cc','p-cc'],['tab-con','p-con']];
+const TABS = [['tab-ov','p-ov'],['tab-hs','p-hs'],['tab-con','p-con']];
 TABS.forEach(([b,p]) => {
   $(b).onclick = () => {
     TABS.forEach(([b2,p2]) => {
@@ -607,13 +580,20 @@ function render(d) {
 
   /* --- recommended channel --- */
   const top = d.scores.length ? d.scores[0].load : 0;
-  $('o-free').innerHTML = d.scores.slice(0, 6).map(x => {
+  /* Every channel a radio can be set to, in channel order, so the reader can
+     see the whole band rather than the top six. The recommendation is marked
+     in place instead of being the only thing on show. */
+  const best = v.best_ch;
+  const rows2 = d.scores.slice().sort((a, b) => a.ch - b.ch);
+  $('o-free').innerHTML = rows2.map(x => {
     const pct = top > 0 ? Math.max(2, Math.round(100 * x.load / top)) : 2;
     const tag = x.dfs ? '<span class="tag dfs">DFS</span>' :
                 (x.ch >= 149 ? '<span class="tag u3">U3</span>' : '');
-    return `<tr><td>${x.ch}</td><td class="n">${fmtLoad(x.load)}</td>
+    const star = x.ch === best ? '<span class="star">★</span>' : '';
+    return `<tr${x.ch === best ? ' class="rec"' : ''}><td>${x.ch}${star}</td>
+      <td class="n">${fmtLoad(x.load)}</td>
       <td class="n">${x.co}</td><td class="n">${x.adj}</td>
-      <td style="width:38%">${tag}<div class="bar"><i style="width:${pct}%"></i></div></td></tr>`;
+      <td style="width:34%">${tag}<div class="bar"><i style="width:${pct}%"></i></div></td></tr>`;
   }).join('') || '<tr><td>—</td></tr>';
   setV($('o-pick'), v.best_ch != null ? ('ch ' + v.best_ch) : '无数据',
        v.best_ch != null ? 'ok' : 'bad');
@@ -671,10 +651,6 @@ function render(d) {
   setV($('d-u2c'), s.nunii2c + ' 个', s.nunii2c > 0 ? 'ok' : 'bad');
   setV($('d-ch'), d.dfsCh.length ? d.dfsCh.join(' ') : '无');
 
-  /* --- country page --- */
-  setV($('c-5g'), s.n5 + ' 个');
-  setV($('c-unii2c'), s.nunii2c + ' 个', s.nunii2c > 0 ? 'ok' : 'bad');
-  setV($('c-unii3'), s.nunii3 + ' 个');
 }
 
 /* Interference sums span many orders of magnitude (one -25 dBm AP is ~30k
@@ -813,44 +789,6 @@ $('h-save').onclick = busy($('h-save'), async () => {
   else st('已写入 ' + lines + ' 条，但挂载失败；详情见控制台', { ok: false });
 });
 
-/* DNS burst. The count is the whole point - a single lookup returns one address
-   per round-robin group, so 64 queries are what exposes the CDN's spread. */
-$('d-run').onclick = busy($('d-run'), async () => {
-  const host = ($('d-host').value || '').trim();
-  const server = ($('d-server').value || '').trim();
-  const count = Math.max(1, Math.min(256, +$('d-count').value || 64));
-  $('d-count').value = count;
-
-  if (!/^[A-Za-z0-9._-]{1,253}$/.test(host) || !/\./.test(host)) {
-    st('域名不合法，例如 google.com', { ok: false }); return;
-  }
-  if (!/^[0-9.]{7,15}$/.test(server) && !/^[0-9A-Fa-f:]+$/.test(server)) {
-    st('DNS 服务器地址不合法，例如 8.8.8.8', { ok: false }); return;
-  }
-
-  $('d-list').innerHTML = '';
-  setV($('d-hits'), '—');
-  setV($('d-prog'), '0 / ' + count);
-
-  const r = await dnsBurst(host, server, count, 2500,
-    (done, total) => setV($('d-prog'), done + ' / ' + total),
-    (msg) => klog('info', msg));
-
-  if (r.error === 'write-failed') {
-    st('DNS 解析失败：无法写入临时查询报文（/tmp 不可写）', { ok: false }); return;
-  }
-  if (!r.ips.length) {
-    setV($('d-hits'), '0 个', 'bad');
-    st('DNS 解析无响应：确认服务器 ' + server + ' 可达、未被拦截', { ok: false }); return;
-  }
-
-  setV($('d-hits'), r.ips.length + ' 个', 'ok');
-  $('d-list').innerHTML = r.ips.map(x =>
-    `<div><span>${esc(x.ip)}</span><i>${x.hits} / ${r.rounds}</i></div>`).join('');
-  st('DNS 解析完成：' + host + ' → ' + r.ips.length + ' 个地址（' + r.rounds + ' 次查询）',
-     { ok: true });
-});
-
 /* /etc/hosts is usually a symlink to /system/etc/hosts. Mount each real path
    once, decided here rather than in a shell helper. */
 async function mountTargets() {
@@ -904,18 +842,10 @@ $('c-set').onclick = busy($('c-set'), async () => {
 
 $('c-auto').onclick = busy($('c-auto'), async () => {
   st('交还国家码控制权给系统…', { running: true });
-  const r = await shRaw('cmd wifi force-country-code disabled 2>&1; echo rc=$?');
-  out(r);
+  const r = await shRaw('cmd wifi force-country-code 2>&1; echo rc=$?');
+  klog('info', '恢复自动：' + (r || '').trim().split('\n')[0]);
   await loadStatus();
   st('已恢复为系统自动判断', { ok: true });
-});
-
-$('c-diag').onclick = busy($('c-diag'), async () => {
-  st('运行四层诊断（framework / regdb / 驱动 / 射频）…', { running: true });
-  const d = await diagnoseLayers();
-  out(d.text);
-  st('诊断完成：framework=' + (d.current || '未知') +
-     ' · UNII-2C 可见 ' + d.unii2c + ' 个 · 5GHz ' + d.n5 + ' 个', { ok: true });
 });
 
 /* Hardware capability. The point is to let the device answer "can you do

@@ -8,7 +8,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Needed so the tagged build can attach the zip to a Release.
+# Needed so a tagged build can attach the zip to a Release.
 permissions:
   contents: write
 
@@ -18,88 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Lint shell scripts (busybox ash, as on Android)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq busybox-static
-          fail=0
-          for f in module/*.sh build.sh; do
-            busybox ash -n "$f" || { echo "::error file=$f::syntax error"; fail=1; }
-          done
-          exit $fail
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      - name: Validate module.prop
-        run: |
-          id=$(sed -n 's/^id=//p' module/module.prop | tail -1)
-          case "$id" in
-            [A-Za-z]*) ;;
-            *) echo "::error::module id must start with a letter"; exit 1 ;;
-          esac
-          for k in id name version versionCode author description; do
-            grep -q "^$k=" module/module.prop || { echo "::error::missing $k"; exit 1; }
-          done
-
-      # One build. The step used to run twice: once to package, once to check
-      # that the packaging had happened.
-      - name: Build zip
+      # build.sh does the rest: shell syntax (dash), repository invariants,
+      # all three suites, packaging, and verification of the artifact itself.
+      # Keeping that logic in one script means CI and a developer's machine run
+      # exactly the same checks instead of two drifting copies.
+      - name: Build and test
         run: ./build.sh
 
-      - name: Check the merge rules without a device
-        run: |
-          # The page merges user-hosts in JavaScript now; manager.sh is gone.
-          # This is the same suite that guards first-line-wins and dedup.
-          node tests/test-hosts.js
-
-      - name: Check no collector script came back
-        run: |
-          for f in manager.sh collect.sh probe.sh diagnose.sh capacity.sh action.sh service.sh; do
-            test ! -e "module/$f" || { echo "::error::module/$f must not exist"; exit 1; }
-          done
-          if grep -n "MODDIR + '/" module/webroot/index.html module/webroot/diag.js | grep '\.sh'; then
-            echo "::error::the page must not execute a module script"; exit 1
-          fi
-
-      - name: Verify in-page diagnostic parser
-        run: |
-          # The raw scan table is the only path between the device and every
-          # number on screen; diag.js parses it.
-          node tests/test-diag.js
-
-      - name: Verify WebUI action flow
-        run: |
-          # Startup reads without triggering a scan, the gateway/mask/route rows
-          # render, hosts is read-only until edited, and a DNS burst fires the
-          # requested number of piped queries.
-          node tests/test-status.js
-
-      - name: Verify the packaged page is self-contained
-        run: |
-          # The WebView loads index.html from an internal path where
-          # <script src> resolution is unreliable, so the packaged copy must
-          # contain diag.js inline - and only the packaged copy. The repository
-          # keeps them separate.
-          unzip -p dist/*.zip webroot/index.html > /tmp/idx.html
-          if grep -q '<script src=' /tmp/idx.html; then
-            echo "::error::packaged index.html references an external script"; exit 1
-          fi
-          if unzip -l dist/*.zip | grep -q 'webroot/diag.js'; then
-            echo "::error::packaged page still ships a second copy of diag.js"; exit 1
-          fi
-          # Every function the page calls must exist in the inlined copy.
-          node -e '
-            const fs = require("fs");
-            const s = fs.readFileSync(0, "utf8");
-            for (const fn of ["parseScan","parseLink","analyse","scoreChannels","measure",
-                            "mergeHosts","countHosts","diagnoseLayers","parseNet","render",
-                            "parseEcho","prefixToMask","parseAddr","parseRoutes",
-                            "dnsQuery","dnsParseHex","dnsBurst","deviceCode","echoLookup",
-                            "shRaw","b64bytes","rssiBand","parseCC"]) {
-              if (!s.includes("function " + fn) && !s.includes("async function " + fn))
-                { console.error("missing " + fn); process.exit(1); }
-            }
-          ' < /tmp/idx.html
-          # The build must not have touched the tracked source.
-          git diff --exit-code -- module/webroot/index.html
+      - name: Check the build did not touch the source
+        run: git diff --exit-code -- module/ tests/
 
       - uses: actions/upload-artifact@v4
         with:

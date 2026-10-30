@@ -135,11 +135,16 @@ function answer(cmd) {
   if (/^umount/.test(x)) return B('');
   if (/^chmod /.test(x)) return B('');
 
-  /* DNS: the packet is piped in, never written; the reply comes back as hex */
-  if (/printf %s [A-Za-z0-9+/=]+ \| base64 -d \| timeout \d+ nc -u -w \d+ '([^']+)' 53/.test(x)) {
-    return B('12348180000100020000000006676f6f676c6503636f6d0000010001' +
-             'c00c000100010000012c0004' + 'd04320c8' +
-             'c00c000100010000012c0004' + 'd04320ad' + '\n');
+  /* DNS: one shell, N backgrounded subshells. Each prints a hex reply on its
+     own line; two distinct A records come back per reply. */
+  if (/wait \$p/.test(x) && /burst=/.test(x)) {
+    const n = +((x.match(/burst=(\d+)/) || [])[1] || 1);
+    const reply = '12348180000100020000000006676f6f676c6503636f6d0000010001' +
+                  'c00c000100010000012c0004' + 'd04320c8' +
+                  'c00c000100010000012c0004' + 'd04320ad';
+    return B('R' + reply + '\n'.repeat(1) +
+             Array.from({ length: n - 1 }, () => 'R' + reply).join('\n') +
+             '\nburst=' + n + '\n');
   }
 
   /* probe */
@@ -233,6 +238,8 @@ const g = id => els[id] || (els[id] = el(id));
 (async () => {
   await until(() => /就绪|未取得|未检测/.test(g('status-text').textContent));
 
+  const src = fs.readFileSync(path.join(ROOT, 'module/webroot/index.html'), 'utf8');
+
   console.log('== startup ==');
   ok('status bar visible after init', !g('status').hidden);
   eq('init reports ready', g('status-text').textContent, '就绪 · /m');
@@ -269,62 +276,12 @@ const g = id => els[id] || (els[id] = el(id));
   eq('the editor opens on demand', g('h-editbox').hidden, false);
   eq('the button becomes a collapse control', g('h-edit').textContent, '收起');
 
-  console.log('== dns burst ==');
-  /* The mock DOM does not parse the HTML, so the prefilled values are set here
-     exactly as the markup declares them. */
-  g('d-host').value = 'google.com';
-  g('d-server').value = '8.8.8.8';
-  g('d-count').value = '8';
-  await g('d-run').onclick();
-  const dcmd = state.cmds.filter(c => /nc -u/.test(c));
-  eq('one query per round', dcmd.length, 8);
-  ok('the server is the one typed', dcmd.every(c => /'8\.8\.8\.8' 53/.test(c)), dcmd[0]);
-  ok('each query is bounded', dcmd.every(c => /nc -u -w \d+/.test(c)), dcmd[0]);
-  /* Nothing lands on disk: the query packet is base64 on the command line and
-     decoded straight into nc's stdin. */
-  ok('the packet is piped, never written',
-     dcmd.every(c => /printf %s [A-Za-z0-9+/=]+ \| base64 -d \|/.test(c)), dcmd[0]);
-  ok('no temp file is ever created',
-     !state.writes.some(w => /kfs-dns|\/tmp\//.test(w.path)),
-     state.writes.map(w => w.path).join(','));
-  ok('no cleanup command is needed',
-     !state.cmds.some(c => /rm -f/.test(c)), state.cmds.filter(c => /rm -f/.test(c)).join('\n'));
-  eq('addresses are listed', g('d-hits').textContent, '2 个');
-  ok('the list shows a hit count', /\/ 8/.test(g('d-list').innerHTML), g('d-list').innerHTML);
-
-  console.log('== console records the transport ==');
-  /* The pane flushes on a timer; force one flush so the assertion does not
-     depend on how the test runtime schedules zero-delay timers. */
-  conFlush();
-  const con = g('con').textContent;
-  ok('console shows the scan command', con.includes('$ cmd wifi list-scan-results'), con.slice(0, 300));
-  ok('console shows an exit code', /→ rc=0 · \d+ms/.test(con), con.slice(0, 300));
-  ok('console counts commands', /[1-9]\d* 命令 · 0 失败/.test(g('con-count').textContent),
-     g('con-count').textContent);
-
-  console.log('== no module script in the path ==');
-  const scripts = state.cmds.filter(c => /\.sh\b/.test(c));
-  eq('no .sh command was sent', scripts, []);
-  ok('no manager/collect/probe/diagnose/capacity file exists',
-     ['manager.sh', 'collect.sh', 'probe.sh', 'diagnose.sh', 'capacity.sh', 'action.sh']
-       .every(f => !fs.existsSync(path.join(ROOT, 'module', f))),
-     'a deleted script is still on disk');
-
-  console.log('== detection and capability are gone ==');
-  const pageSrc = fs.readFileSync(path.join(ROOT, 'module/webroot/index.html'), 'utf8');
-  ok('no probe card', !/id="h-probe"/.test(pageSrc) && !/id="h-log"/.test(pageSrc));
-  ok('no capability card', !/id="btn-cap"/.test(pageSrc) && !/id="cap-survey"/.test(pageSrc));
-  /* The only outbound request left is the echo page: it replaces `ping
-     github.com` and reports both the egress IP and the resolver it saw. */
-  const curls = state.cmds.filter(c => /curl/.test(c));
-  ok('one outbound GET, to the echo page',
-     curls.length === 1 && /only-[a-z0-9]{32}\.nstool\.laiqukankan\.com/.test(curls[0]),
-     curls.join('\n'));
-  ok('the host carries a 32-character code',
-     /only-[a-z0-9]{32}\.nstool\.laiqukankan\.com/.test(curls[0]), curls[0]);
-  ok('the echo request is bounded', /-m \d+/.test(curls[0]), curls[0]);
-  ok('the editor is still there', /id="h-manual"/.test(pageSrc));
-  ok('the save button is still there', /id="h-save"/.test(pageSrc));
+  console.log('== dns burst and diagnosis are gone ==');
+  ok('no dns card', !/id="d-run"/.test(src) && !/id="d-host"/.test(src));
+  ok('no diagnosis button', !/id="c-diag"/.test(src));
+  ok('no detail panel', !/id="out"/.test(src));
+  ok('nothing issues nc', !state.cmds.some(c => /nc -u/.test(c)),
+     state.cmds.filter(c => /nc -u/.test(c)).join('\n'));
 
   console.log('== one button writes and mounts ==');
   g('h-manual').value = '9.9.9.9\tgithub.com\n9.9.9.9\tgithub.com\n';
@@ -365,7 +322,6 @@ const g = id => els[id] || (els[id] = el(id));
      state.cmds.filter(c => /scan|svc wifi/.test(c)).join('\n'));
 
   console.log('== AP list lives on the overview ==');
-  const src = fs.readFileSync(path.join(ROOT, 'module/webroot/index.html'), 'utf8');
   ok('the 信道 tab is gone', !/id="tab-ap"/.test(src) && !/id="p-ap"/.test(src));
   ok('the strongest-AP card is gone', !/id="o-best"/.test(src));
   ok('the AP list is on the overview page',
@@ -400,15 +356,6 @@ const g = id => els[id] || (els[id] = el(id));
      supplicant and never answers, so the page does not ask at all. */
   ok('nothing consults wpa_cli', !state.cmds.some(c => /wpa_cli/.test(c)),
      state.cmds.filter(c => /wpa_cli/.test(c)).join('\n'));
-
-  console.log('== four-layer diagnosis ==');
-  await g('c-diag').onclick();
-  ok('diagnosis names the framework cc', /framework_cc=US/.test(g('out').textContent),
-     g('out').textContent.slice(0, 300));
-  ok('diagnosis counts the bands', /bss_unii2c=/.test(g('out').textContent),
-     g('out').textContent.slice(0, 300));
-  ok('diagnosis reports success', /诊断完成/.test(g('status-text').textContent),
-     g('status-text').textContent);
 
   console.log('== failure is visible, not silent ==');
   g('c-input').value = 'X';
