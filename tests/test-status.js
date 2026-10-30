@@ -7,7 +7,7 @@
  *     changes are plain Android commands issued from the page;
  *   - detection is read-only: results go to the editor, never to a file;
  *   - one button writes user-hosts, merges hosts in JS, and mounts;
- *   - the country code is written to config + system.prop and applied;
+ *   - the country code is one runtime `cmd wifi force-country-code` call, read back;
  *   - a finished action must not trigger a second, invisible full refresh;
  *   - there is no scan trigger left, and the AP list is on the overview.
  *
@@ -52,23 +52,16 @@ const LINK = 'WifiInfo: SSID: "Home", RSSI: -51, Link speed: 573Mbps, ' +
              'Frequency: 5180MHz, Wi-Fi standard: 11ax\n';
 const ROUTE = 'default via 192.168.1.1 dev wlan0 proto static\n' +
               '192.168.1.0/24 dev wlan0 proto kernel scope link src 192.168.1.5\n';
-const PING = '3 packets transmitted, 3 received, 0% packet loss, time 400ms\n' +
-             'rtt min/avg/max/mdev = 1.0/2.4/3.0/0.5 ms\n';
 
 const state = {
   scan: SCAN,
   link: LINK,
   route: ROUTE,
-  ping: PING,
-  dns: 'rc=0\n',
   curCC: 'Wifi Country Code: US\n',
   userHosts: '1.1.1.1\tmtalk.google.com\n',
   hosts: '# KsuFastSurfing - seed\n\n127.0.0.1\tlocalhost\n' +
          '::1\tlocalhost ip6-localhost ip6-loopback\n',
   sysHosts: '# android stock hosts\n',
-  config: 'CC=US\n',
-  systemProp: '',
-  domains: 'github.com\nmtalk.google.com\n',
   mounted: false,
   cmds: [],
   writes: []
@@ -83,10 +76,7 @@ const strip = cmd => {
 const FILES = {
   '/m/user-hosts': 'userHosts',
   '/m/hosts': 'hosts',
-  '/system/etc/hosts': 'sysHosts',
-  '/m/config': 'config',
-  '/m/system.prop': 'systemProp',
-  '/m/domains': 'domains'
+  '/system/etc/hosts': 'sysHosts'
 };
 
 function answer(cmd) {
@@ -131,64 +121,16 @@ function answer(cmd) {
   if (/cmd wifi get-country-code/.test(x)) return B(state.curCC);
   if (/^mount 2>\/dev\/null \| grep ' \/system\/etc\/hosts '/.test(x))
     return B(state.mounted ? '/m/hosts on /system/etc/hosts type none (rw,seclabel,bind)\n' : '');
-  if (/grep -c 'WCNSS_qcom_cfg'/.test(x)) return B('0\n');
   if (/^\[ -e '([^']+)' \] && readlink -f/.test(x))
     return B(x.match(/'([^']+)'/)[1] + '\n');
   if (/mount -o bind/.test(x)) { state.mounted = true; return B('mounted=1\n'); }
   if (/^umount/.test(x)) return B('');
   if (/^chmod /.test(x)) return B('');
 
-  /* DNS: one shell, N backgrounded subshells. Each prints a hex reply on its
-     own line; two distinct A records come back per reply. */
-  if (/wait \$p/.test(x) && /burst=/.test(x)) {
-    const n = +((x.match(/burst=(\d+)/) || [])[1] || 1);
-    const reply = '12348180000100020000000006676f6f676c6503636f6d0000010001' +
-                  'c00c000100010000012c0004' + 'd04320c8' +
-                  'c00c000100010000012c0004' + 'd04320ad';
-    return B('R' + reply + '\n'.repeat(1) +
-             Array.from({ length: n - 1 }, () => 'R' + reply).join('\n') +
-             '\nburst=' + n + '\n');
-  }
-
-  /* probe */
-  if (/ping -c 1 -W 1 '([^']+)'/.test(x) && /getent ahosts/.test(x)) {
-    const host = x.match(/ping -c 1 -W 1 '([^']+)'/)[1];
-    return B(host === 'github.com' ? '140.82.113.4\n' : '142.250.72.14\n');
-  }
-  /* DoH is queried alongside the system lookup, not as a fallback: it is the
-     only source that returns the whole A set. */
-  if (/cloudflare-dns\.com/.test(x)) {
-    const name = decodeURIComponent((x.match(/name=([^&']+)/) || [])[1] || '');
-    const set = name === 'github.com'
-      ? ['140.82.113.4', '140.82.112.4']
-      : ['142.250.72.14', '142.250.73.14'];
-    return B(JSON.stringify({ Answer: set.map(d => ({ type: 1, data: d })) }));
-  }
-  if (/dns\.google/.test(x)) return B(JSON.stringify({ Answer: [] }));
-  if (/command -v curl/.test(x)) return B('yes\n');
-  if (/curl .*--resolve/.test(x)) return B('0.032 0.081\n');
-
-  /* country code */
+  /* country code: one runtime call each way, no file and no property */
   if (/force-country-code enabled/.test(x)) return B('');
   if (/force-country-code disabled/.test(x)) return B('');
-  if (/^command -v resetprop/.test(x)) return B('rc=0\n');
-  if (/iw reg set/.test(x)) return B('');
-
-  /* diagnose */
   if (/dumpsys wifi/.test(x)) return B('Current Country Code: US\n');
-  if (/settings get global wifi_country_code/.test(x)) return B('US\n');
-  if (/^\[ -r '.*' \] && grep/.test(x)) return B('');
-
-  /* capacity */
-  if (/^getprop ro\.soc\.model/.test(x)) return B('SM8650\n\nqcom\n');
-  if (/ls -d \/sys\/module/.test(x)) return B('/sys/module/qcacld\n');
-  if (/ls \/sys\/class\/net/.test(x)) return B('wlan0 p2p0 \n');
-  if (/ls -d \/sys\/class\/ieee80211/.test(x)) return B('1\n');
-  if (/command -v iw/.test(x)) return B('');
-  if (/find \/sys\/kernel\/debug\/ieee80211.*survey/.test(x)) return B('0\n');
-  if (/find \/sys\/kernel\/debug\/ieee80211.*interface_modes/.test(x)) return B('');
-  if (/nexmon/.test(x)) return B('');
-  if (/for d in \/sys\/class\/net\/\*\/device/.test(x)) return B('');
 
   return B('');
 }
@@ -198,8 +140,7 @@ global.ksu = {
   exec(cmd, opt, cbName) {
     /* KernelSU takes the callback *name*, not a function. */
     state.cmds.push(cmd);
-    const slow = state.slowCurl && /--resolve/.test(cmd) ? 150 : 0;
-    realSetTimeout(() => global.window[cbName](0, answer(cmd), ''), slow);
+    realSetTimeout(() => global.window[cbName](0, answer(cmd), ''), 0);
   }
 };
 
@@ -277,7 +218,8 @@ const g = id => els[id] || (els[id] = el(id));
   ok('loss and gateway rtt are gone from the page',
      !/id="n-loss"/.test(src) && !/id="n-rtt"/.test(src));
   ok('no ping is issued any more',
-     !state.cmds.some(c => /^ping /) || true, '');
+     !state.cmds.some(c => /(^|[;&|]\s*)ping\s/.test(c)),
+     state.cmds.filter(c => /ping/.test(c)).join('\n'));
   ok('the gateway is still read, just not pinged',
      state.cmds.some(c => /ip route/.test(c)), 'no ip route');
 

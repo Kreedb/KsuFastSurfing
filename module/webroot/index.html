@@ -746,11 +746,6 @@ function busy(btn, fn) {
 }
 
 /* ---------- actions ---------- */
-/* Rescan: request it, then poll only the scan table until a fresher minimum
-   age appears. No script, no fixed sleep beyond the bounded poll interval. */
-/* Append detection results without touching anything the user already wrote.
-   A hostname already present keeps the user's value: the editor is the single
-   source of truth, so rewriting a line would be an invisible edit. */
 /* The one button that changes what is mounted: write the editor verbatim,
    merge it in the page, write both copies, then bind-mount them. */
 $('h-save').onclick = busy($('h-save'), async () => {
@@ -846,9 +841,6 @@ $('c-auto').onclick = busy($('c-auto'), async () => {
   st('已恢复为系统自动判断', { ok: true });
 });
 
-/* Hardware capability. The point is to let the device answer "can you do
-   spectrum / deauth" instead of guessing from the model name: the same phone
-   family ships with different radios, and the driver is what decides. */
 $('con-clear').onclick = () => {
   conLines = []; conBuf = []; conCmds = 0; conErrs = 0;
   $('con').textContent = '（已清空）';

@@ -509,7 +509,7 @@ async function measure() {
 
   const d = analyse(rows, parseLink(linkTxt),
                     parseNet(routeTxt, addrTxt, echo));
-  d.iface = ifc;          /* capacity probing needs the interface that has the route */
+  d.iface = ifc;          /* the address card names the interface that holds the route */
   return d;
 }
 

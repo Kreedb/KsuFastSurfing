@@ -13,7 +13,7 @@ module/user-hosts              唯一输入
 module/hosts  ──bind mount──▶  /system/etc/hosts
 ```
 
-页面不做域名探测：没有 `probeAll()`、没有 `curl` 测速、没有 `domains` 读取。
+页面不做域名探测：没有 `probeAll()`、没有 `curl` 测速、不读 `module/domains`。
 需要哪个地址就填哪个——公共 hosts 里的 IP 对别人快、对你未必，CDN 域名尤其如此，
 自动挑出来的“当前最快地址”并不能稳定代表你之后的线路。
 
@@ -68,7 +68,8 @@ loadStatus() 读回
 模块没有运行配置文件。国家码是框架的运行时状态（`cmd wifi force-country-code`），
 不落到任何文件里。
 
-`module/domains` 已不再被读取，保留只为兼容旧版本；可以安全删除。
+`module/domains`（旧的域名探测列表）已删除：v2.2 起页面就不再做域名解析，
+v2.3 之后没有任何代码读它，留着只会误导。
 
 ## 排障
 
@@ -76,5 +77,5 @@ loadStatus() 读回
 |---|---|---|
 | 保存后没生效 | 挂载失败、SELinux 阻止 | 控制台看 `mounted=0`；`mount.log` 只有开机记录 |
 | 条目数比编辑框少 | 同名域名被去重，或行首不是合法 IP | 差值就是被丢弃的行，见「合并与去重」 |
-| 加速没感觉 | 应用走 DoT/DoH，绕过 hosts | 关闭系统私人 DNS 再测 |
+| hosts 生效但解析没变 | 应用走 DoT/DoH，绕过 hosts | 关闭系统私人 DNS 再测 |
 | 重启后失效 | `post-fs-data.sh` 没跑或 hosts 为空 | 看 `/data/adb/modules/KsuFastSurfing/mount.log` |

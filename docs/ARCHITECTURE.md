@@ -42,7 +42,7 @@ uninstall.sh    ──▶ 关闭国家码、卸载 bind mount
 |---|---|---|---|
 | 安装 | `customize.sh` | 设置 POSIX 权限位，打印使用提示 | 否 |
 | 开机 | `post-fs-data.sh` | 挂载 `module/hosts` | **否** |
-| 打开 WebUI | `index.html` | 读 `user-hosts` / `hosts`，采集一次扫描、链路、地址、出网 | 是（一次 HTTPS GET） |
+| 打开 WebUI | `index.html` | 读 `user-hosts` / `hosts`，采集一次扫描、链路、地址、出网 | 是（一次 HTTPS GET 回显页） |
 | 点「保存并应用」 | 页面 | 写 `user-hosts`、合并 `hosts`、写两份副本、bind mount | 否 |
 | 点「应用」国家码 | 页面 | `cmd wifi force-country-code enabled XX` + 读回校验 | 否 |
 | 卸载 | `uninstall.sh` | `cmd wifi force-country-code disabled`、umount | 否 |
@@ -102,10 +102,10 @@ meta-overlayfs），只放 `module/system/etc/hosts` 在没装 metamodule 的设
 | 驱动 / 固件配置 | 厂商 BDF / `WCNSS_qcom_cfg.ini` | **不做**：overlay 要等下次开机，可能反过来盖掉框架值 |
 | 射频能力 | 硬件与固件信道表 | **改不了**，只能由扫描结果看出来 |
 
-早先的版本同时写 `config` + `system.prop`、`resetprop` 四个键、overlay 厂商 ini。
+v2.2 及更早的版本同时写 `config` + `system.prop`、`resetprop` 四个键、overlay 厂商 ini。
 这四条路彼此不同步：属性只在重启后生效，`cmd wifi` 只影响运行时，overlay 还要再等
 一次开机，而页面上显示的“配置值”只是文件里写了什么，无法证明射频真的接受了。
-现在改成一个能读回的运行时值：**命令退出 0 不算成功，`get-country-code` 读回来一致
+v2.3 起只剩一个能读回的运行时值：**命令退出 0 不算成功，`get-country-code` 读回来一致
 才算**。代价是重启后回到系统判断，需要在页面上再点一次；这一点写在按钮说明里。
 
 ## 文件职责

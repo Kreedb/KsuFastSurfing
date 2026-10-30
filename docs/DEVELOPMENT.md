@@ -96,7 +96,7 @@ node tests/test-diag.js        # 也可以单独跑某一份
 一条命令做完所有事，失败即中止且不产出 zip：
 
 1. `dash -n` 检查 `module/*.sh` 与 `build.sh`
-2. 拦截被删除的 6 个脚本复活、页面里出现 `MODDIR + '/...sh'`
+2. 拦截被删除的 6 个脚本（`manager` / `collect` / `probe` / `diagnose` / `capacity` / `action`）复活、页面里出现 `MODDIR + '/...sh'`
 3. 校验 `module.prop` 必填字段与 id 首字母
 4. 跑 `tests/run.js`（三套并行，约 0.4 秒）
 5. 暂存副本里内联 `diag.js`、打包
@@ -110,7 +110,7 @@ node tests/test-diag.js        # 也可以单独跑某一份
 
 - Shebang 一律 `#!/system/bin/sh`，用 `dash -n` 校验（Android 没有 bash）
 - `MODDIR=${0%/*}` 足够：三个钩子都由管理器以绝对路径调用
-- 不假设 `curl` / `wget` / `iw` / `getent` 存在，逐项 `command -v` 降级
+- 不假设 `curl` / `wget` / `iw` 存在，逐项 `command -v` 降级（当前三个钩子都不联网，实际不依赖它们）
 - 修改挂载前先 `umount`，挂载必须幂等
 - 开机日志用 `date '+%Y-%m-%d %H:%M:%S'`，不依赖 awk 的 `strftime`
 - 不在脚本里做无上限的 `sleep`
@@ -148,7 +148,7 @@ node tests/test-diag.js        # 也可以单独跑某一份
 `.github/workflows/build.yml` 只做四件事：
 
 1. checkout + `setup-node`
-2. `./build.sh`（上面那 6 步全部在这里，CI 与本地跑的是同一份逻辑）
+2. `./build.sh`（上面 6 步里的语法、守卫、测试、打包、产物校验都在这里，CI 与本地跑的是同一份逻辑）
 3. `git diff --exit-code -- module/ tests/` 确认构建没有改源文件
 4. 上传 zip；只有推 `v*` tag 时才创建 Release
 
@@ -189,3 +189,4 @@ zip 里所有时间戳都被固定为 1980-01-01。
 - 新增生命周期文件要同时改：`customize.sh` 权限表、`build.sh` 的 `EXEC` 集合
   （CI 复用同一份 `build.sh`，不需要再改第二处）
 - 新增运行时文件要确认不会被 `build.sh` 打进包（加入 `SKIP`）
+- 当前打进包的只有 `module.prop`、三个钩子、三个 hosts 文件与 `webroot/index.html`（8 个）

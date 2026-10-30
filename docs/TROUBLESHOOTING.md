@@ -2,7 +2,7 @@
 
 ## 先看控制台
 
-WebUI 第五个选项卡「控制台」打印页面发出的每一条命令、退出码、耗时与输出摘要。
+WebUI 第三个选项卡「控制台」打印页面发出的每一条命令、退出码、耗时与输出摘要。
 任何数字不对，先在这里找上一条 `$` 命令和它的 `→ rc=…`。
 
 - `!` 开头 = 命令失败或超时
@@ -12,12 +12,12 @@ WebUI 第五个选项卡「控制台」打印页面发出的每一条命令、�
 页面不再写 `probe.log` / `diagnose.log` / `manager.log`。设备上还会留下的运行时文件只有：
 
 ```sh
-cat /data/adb/modules/KsuFastSurfing/mount.log    # 开机属性 / vendor overlay / 挂载
+cat /data/adb/modules/KsuFastSurfing/mount.log    # 开机的挂载结果与校验
 ```
 
 ## 状态一次看全
 
-页面顶部状态条只给结论；字段级状态在 hosts 页与国家码页。命令行等价检查：
+页面顶部状态条只给结论；字段级状态在网络配置页。命令行等价检查：
 
 ```sh
 su -c 'wc -l /data/adb/modules/KsuFastSurfing/user-hosts'
@@ -35,7 +35,7 @@ su -c 'cmd wifi get-country-code'
 | 现象 | 常见原因 | 怎么确认 / 处理 |
 |---|---|---|
 | 显示“未挂载” | 未重启；SELinux 阻止 bind mount；另一份 hosts 覆盖 | 控制台看 `mount -o bind` 的 `mounted=0`；`mount.log` 只有开机记录 |
-| hosts 生效但没加速 | 应用走 DoT / DoH，绕过 hosts | 关闭系统「私人 DNS」再测；`ping` 域名看解析结果 |
+| hosts 生效但解析没变 | 应用走 DoT / DoH，绕过 hosts | 关闭系统「私人 DNS」再测；`ping` 域名看解析结果 |
 | 出口 IP 显示“未获取” | 回显页不可达，或 ROM 没有 `curl` | 看控制台那条 `curl` 的 rc 与 stderr；其余卡片不受影响 |
 | 保存失败 | 写入或挂载出错 | 控制台看 `write=FAIL` 或 `mounted=0`；状态条指向控制台 |
 | MAC 显示星号 | 框架在没有定位权限时抹掉 BSSID 中段，root 也无法还原 | 不编造地址；属预期行为，不影响信道/干扰结论 |
