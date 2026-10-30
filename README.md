@@ -2,7 +2,9 @@
 
 **KernelSU / Magisk 模块：WiFi 诊断 · 本机实测的 hosts 加速 · 可配置 WiFi 国家码。**
 
-纯脚本 + WebUI，systemless：不写真实分区，卸载即恢复。
+WebUI 驱动，systemless：不写真实分区，卸载即恢复。模块里没有采集/控制脚本——
+读取扫描、诊断、写 hosts、改国家码都由页面直接执行 Android 命令，每条命令与输出
+都能在「控制台」选项卡里看到。
 
 `Android 8+`（`cmd wifi` 相关功能需 Android 10+）· `KernelSU` · `Magisk`
 
@@ -26,7 +28,6 @@
 - 信道建议：按线性功率加权的干扰分数，5GHz 优先、DFS 靠后
 - DFS 可见性：UNII-2A / 2C / 3 分带计数，判断 ch100-144 是“扫不到”还是“UI 不显示”
 - 链路质量：网关、丢包、RTT、DNS 解析，一次区分无线问题和上行问题
-- 硬件能力：`survey` / 监听 / 注入三项由设备自己回答，不按机型猜
 
 数据来自 `cmd wifi`、`dumpsys`、`ip route`、`ping` 与 `/proc` / `/sys`，**不依赖 `iw`**（零售 ROM 通常没有）。
 
@@ -43,16 +44,16 @@
 - 开机注入 `ro.boot.wificountrycode` 等属性，供框架 / 厂商 HAL 初始化时读取
 - 应用国家码时调用 `cmd wifi force-country-code`，覆盖 Android 10+ 的运行时接口
 - 对高通平台尝试 overlay `/vendor/etc/wifi/WCNSS_qcom_cfg.ini` 的 `gStaCountryCode`
-- 四层约束（framework / regdb / 驱动 / 射频）在 WebUI 与 `diagnose` 中分开呈现
+- 四层约束（framework / regdb / 驱动 / 射频）在国家码页的「运行完整诊断」里分开呈现
 
 ## 界面
 
 | 选项卡 | 内容 |
 |---|---|
-| 概览 | 当前链路、周边 AP 数、建议信道、网关 / 丢包 / DNS |
-| 信道 | 按 SSID 分组的 AP 明细、DFS 分带、硬件能力 |
-| hosts | 条目数 / 挂载状态、检测日志、hosts 编辑框、单按钮保存 |
-| 国家码 | 期望值 / 当前值、应用与恢复自动 |
+| 概览 | 当前链路、周边 AP 数、建议信道、网关 / 丢包 / DNS、按信号排序的 AP 明细、DFS 分带 |
+| hosts | 条目数 / 挂载状态、只读 hosts 视图、折叠编辑框、单按钮保存、DNS 解析 |
+| 国家码 | 期望值 / 当前值、应用与恢复自动、四层诊断 |
+| 控制台 | 每条命令、退出码、耗时、输出摘要；清空 / 复制 |
 
 页面配色与背景交给 KernelSU，不强制主题；所有操作反馈在底部全局状态条。
 
@@ -67,25 +68,32 @@
 
 ## 快速开始
 
-- **看信号**：概览页直接读当前链路；「重新扫描」等待新结果落地，状态条会说明是否真的更新
-- **配 hosts**：hosts 页 → 「检测 IP」→ 看日志与追加结果 → 确认 / 修改 → 「保存并应用」
+- **看信号**：概览页直接读当前链路与周边 AP 列表（按信号从强到弱）；扫描由系统负责，页面只读缓存并显示它的年龄
+- **配 hosts**：hosts 页 →「编辑」→ 一行一个 `IP 域名` →「保存并应用」；不编辑时显示设备上实际生效的内容
+- **看 DNS**：hosts 页 → 填域名 / DNS / 次数 → 「开始解析」，看每个地址的命中占比
 - **改国家码**：国家码页输入两位码 → 「应用」；「恢复自动」交还系统
-- **查 DFS**：信道页看 UNII-2C 计数；为 0 时用 `manager.sh diagnose` 看是哪一层挡住
+- **查 DFS**：概览页看 UNII-2C 计数；为 0 时到国家码页点「运行完整诊断」，看是哪一层挡住
 
-## 常用命令
+## 控制台
 
-```sh
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh status'
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh apply'       # 合并 user-hosts 并挂载
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh set-cc JP'
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'    # 国家码四层诊断
-su -c 'sh /data/adb/modules/KsuFastSurfing/collect.sh'             # 一次取回全部诊断数据
+「控制台」选项卡是页面对设备的完整审计记录：
+
 ```
+12:01:02.345  $ cmd wifi list-scan-results
+12:01:03.120  → rc=0 · 775ms
+12:01:03.121    BSSID  Frequency ...
+                … 共 43 行 / 3204 字节
+```
+
+模块没有命令行入口：功能命令都由页面发出，控制台负责让它们可见。排障时先看这里，
+开机记录看 `/data/adb/modules/KsuFastSurfing/mount.log`。
 
 ## 设计原则
 
-- **开机不联网**：`post-fs-data` 只做本地合并、属性注入与挂载，10 秒预算内完成
-- **检测只读**：`probe.sh` 只输出结果和日志，不改 hosts、不 apply
+- **全部 UI 驱动**：没有 `manager.sh` / `collect.sh` / `probe.sh` / `diagnose.sh` /
+  `capacity.sh`；页面直接发命令、自己解析
+- **开机不联网**：`post-fs-data` 只做属性注入、vendor overlay 与挂载上次保存的 hosts，
+  10 秒预算内完成
 - **单一来源**：`user-hosts` 是唯一输入，合并时同名域名只保留第一条
 - **不编造数据**：拿不到就显示“未获取 / 未知”，不用 0 或猜测填充
 
@@ -96,18 +104,18 @@ su -c 'sh /data/adb/modules/KsuFastSurfing/collect.sh'             # 一次取�
 | [docs/HANDOFF.md](docs/HANDOFF.md) | **接续开发先读**：当前状态、硬约束、验证结果、待办 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 运行架构、生命周期、控制面、文件职责 |
 | [docs/WEBUI.md](docs/WEBUI.md) | 桥接协议、页面数据流、交互纪律、打包方式 |
-| [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) | 扫描解析、信道 / DFS、干扰评分、L3、MAC 恢复 |
-| [docs/HOSTS.md](docs/HOSTS.md) | 探测链、日志格式、去重规则、保存流程 |
+| [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) | 扫描解析、信道 / DFS、干扰评分、L3、脱敏 BSSID |
+| [docs/HOSTS.md](docs/HOSTS.md) | 编辑格式、合并去重规则、保存与挂载流程 |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 构建、测试、脚本规范、Android 坑、发布纪律 |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 按现象排查：挂载、探测、MAC、国家码、页面 |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 按现象排查：挂载、MAC、国家码、页面 |
 | [docs/README.md](docs/README.md) | 文档索引与推荐阅读顺序 |
 
 ## 兼容性
 
 - Android 8+ 可安装；`cmd wifi`、`get-country-code` 需要 Android 10+
-- KernelSU 与 Magisk 均可；依赖 root 执行 `cmd wifi` / `wpa_cli`
-- 不假设 `iw`、`curl`、`wget`、`awk` 的桌面版行为，逐项降级
-- 部分厂商 ROM 在 vendor / 固件层固定国家码，软件无法突破，`diagnose` 会指出是哪一层
+- KernelSU 与 Magisk 均可；依赖 root 执行 `cmd wifi` / `dumpsys` / `ip`
+- 不假设 `iw`、`curl`、`wget` 存在，逐项降级
+- 部分厂商 ROM 在 vendor / 固件层固定国家码，软件无法突破，诊断会指出是哪一层
 
 ## 许可
 

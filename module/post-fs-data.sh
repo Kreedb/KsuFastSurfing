@@ -1,18 +1,24 @@
 #!/system/bin/sh
-# Build the merged hosts file and bind-mount it. No network here: boot must
-# never block on downloads (post-fs-data has a hard 10s budget).
+# Boot hook. The page builds hosts and mounts it while the UI is open; at boot
+# there is no WebView, so this hook can only re-apply what the page saved:
+#   - inject the configured country-code properties
+#   - overlay the vendor WLAN config when that file exists
+#   - bind-mount module/hosts over the system copies
+# No network, no probing, no collection: post-fs-data has a 10 s budget.
+#
+# There is no service.sh and no manager.sh. Everything that measures or changes
+# state runs from the WebUI, where the user can see the command and its output.
+
 MODDIR=${0%/*}
 LOG="$MODDIR/mount.log"
-
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 : > "$LOG"
 
-# The module is unpacked before post-fs-data runs and customize.sh already set
-# 0755, so waiting for the file to become executable could only ever burn the
-# 10 s boot budget. Check once, log once, move on.
-[ -x "$MODDIR/manager.sh" ] || { log "manager.sh missing/not executable"; exit 0; }
-
-sh "$MODDIR/manager.sh" build >>"$LOG" 2>&1
+H="$MODDIR/hosts"
+if [ ! -s "$H" ]; then
+  log "no hosts yet (the WebUI writes one on first save)"
+  exit 0
+fi
 
 # Inject the configured country code before zygote starts.
 CC=$(sed -n 's/^CC=//p' "$MODDIR/config" 2>/dev/null | tail -1 | tr -d '\r' | tr 'a-z' 'A-Z')
@@ -25,6 +31,7 @@ if [ ${#CC} -eq 2 ] && command -v resetprop >/dev/null 2>&1; then
   resetprop -n ro.wifi.country_code "$CC" 2>/dev/null || true
   log "cc props set to $CC"
 fi
+
 # Vendor WLAN config: bind-mount a modified copy over the real /vendor file.
 # The partition is never written to, so a reboot (or unmount) fully reverts it.
 VENDOR_CFG=/vendor/etc/wifi/WCNSS_qcom_cfg.ini
@@ -50,16 +57,42 @@ if [ ${#CC} -eq 2 ] && [ -f "$VENDOR_CFG" ]; then
   fi
 fi
 
-sh "$MODDIR/manager.sh" remount >>"$LOG" 2>&1
+# Mount the file the page wrote. /etc/hosts is usually a symlink to
+# /system/etc/hosts, so the same inode is mounted once.
+chmod 0644 "$H" 2>/dev/null
+chown 0:0 "$H" 2>/dev/null
+chcon u:object_r:system_file:s0 "$H" 2>/dev/null
 
-# Verify by content, not by a domain name: the merged file no longer contains any
-# fixed domain once the user clears their entries, so a domain grep reported a
-# false failure (and the same bug made the WebUI say "not mounted").
-if [ -f "$MODDIR/hosts" ] && cmp -s "$MODDIR/hosts" /system/etc/hosts 2>/dev/null; then
+TARGETS=""
+for t in /system/etc/hosts /etc/hosts; do
+  [ -e "$t" ] || continue
+  real=$(readlink -f "$t" 2>/dev/null)
+  [ -n "$real" ] || real="$t"
+  dup=0
+  for seen in $TARGETS; do
+    [ "$seen" = "$real" ] && dup=1
+  done
+  [ "$dup" = 1 ] && continue
+  TARGETS="$TARGETS $real"
+done
+
+for t in $TARGETS; do
+  umount "$t" 2>/dev/null
+  if mount -o bind "$H" "$t" 2>>"$LOG"; then
+    log "mounted $H -> $t"
+  else
+    log "mount failed: $t"
+  fi
+done
+
+# Verify by content, not by a domain name: the merged file contains no fixed
+# domain once the user clears their entries, so a domain grep would report a
+# false failure.
+if cmp -s "$H" /system/etc/hosts 2>/dev/null; then
   log "verify: OK (identical to module/hosts)"
 elif mount 2>/dev/null | grep -q " /system/etc/hosts "; then
   log "verify: OK (bind mount present)"
 else
-  log "verify: FAILED ($(wc -l < "$MODDIR/hosts" 2>/dev/null) lines in module/hosts)"
+  log "verify: FAILED ($(wc -l < "$H" 2>/dev/null) lines in module/hosts)"
 fi
 exit 0

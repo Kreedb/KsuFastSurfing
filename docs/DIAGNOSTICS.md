@@ -2,18 +2,27 @@
 
 ## 数据从哪来
 
-`collect.sh` 一次执行四条命令，页面按段解析：
+页面直接执行这些命令，每条都进控制台：
 
-| 段 | 命令 | 用途 |
+| 目的 | 命令 | 用途 |
 |---|---|---|
-| `##scan` | `cmd wifi list-scan-results` | 周边 AP：BSSID / 频率 / RSSI / Age / SSID / Flags |
-| `##link` | `cmd wifi status` | 当前连接的 SSID、频率、速率、RSSI、标准 |
-| `##route` | `ip route` | 默认网关与出口接口 |
-| `##ping` | `ping -c 3 -i 0.2 -W 1 <网关>` | 丢包与平均 RTT |
-| `##dns` | `ping -c 1 -W 1 github.com` 的返回码 | 解析 + 出网是否通 |
-| `##mac` | `wpa_cli scan_results` | 还原被框架脱敏的 BSSID |
+| 扫描 | `cmd wifi list-scan-results` | 周边 AP：BSSID / 频率 / RSSI / Age / SSID / Flags |
+| 链路 | `cmd wifi status` | 当前连接的 SSID、频率、速率、RSSI、标准 |
+| 路由 | `ip route`（无 default 时补 `ip route get 1.1.1.1`） | 默认网关、出口接口、路由表 |
+| 地址 | `ip addr show dev <if>` | 本机地址与子网掩码 |
+| 网关 | `ping -c 3 -i 0.2 -W 1 <网关>` | 丢包与平均 RTT |
+| 出网 | `curl -m 6` 访问回显页（GBK） | 出口 IP、出口 DNS、DNS 判定 |
 
-**不依赖 `iw`**。零售机型的 Android 不预装它（荣耀 MagicOS 实测没有），
+没有采集脚本，没有 `##section` 协议。命令的输出由 `parseScan` / `parseLink` /
+`parseNet` 直接解析，缺一段就显示“未获取”。
+
+**不读 `wpa_cli`**。它在 Android 13+ 的 AIDL supplicant 上应接不答：
+`SCAN` 回 `FAIL`，`SCAN_RESULTS` 一直挂到 `wpa_cli` 自己的 **10 秒**超时才吐一行
+`command timed out`。早先的写法在这里叠了“首次 + 重扫 + 0.2/0.4/0.8 重试”，真机上
+白白耗掉 40 秒还拿不到一个地址。`iw` 在零售 ROM 上通常也不存在，所以这条路径
+整体删除：脱敏值原样显示，**不猜、不补、不重试**。
+
+**不依赖 `iw` 做诊断**。零售机型的 Android 不预装它（荣耀 MagicOS 实测没有），
 用 `iw` 做诊断会得到一片 `unavailable`，看起来像工具坏了。全部走 `cmd wifi`
 与 `dumpsys`，这两个是系统自带的。
 
@@ -84,11 +93,16 @@ ch = f <= 2500 ? (f === 2484 ? 14 : floor((f - 2407) / 5))
 
 ```js
 isDfs(c) = (c >= 52 && c <= 64) || (c >= 100 && c <= 144)
-uniiOf(c) = c < 36 ? '-' : c <= 64 ? 'UNII-2A' : c <= 144 ? 'UNII-2C' : 'UNII-3'
+uniiOf(c) = c < 36  ? '-'
+          : c <= 48 ? 'UNII-1'
+          : c <= 64 ? 'UNII-2A'
+          : c <= 144 ? 'UNII-2C'
+          : 'UNII-3'
 ```
 
 5725 MHz 正好是 ch149（UNII-3）。用频率区间判定会把 ch149 算进 UNII-2C，
-所以分桶一律用信道号。
+所以分桶一律用信道号。ch36-48 是 UNII-1——把它并进 UNII-2A 会让“UNII-2A (52-64)”
+计数把每个低信道 AP 都算进去，页面上的 DFS 分带就不再回答问题。
 
 ### 干扰分数
 
@@ -133,11 +147,12 @@ RSSI 是 dBm，先换成线性功率再求和；对数和没有物理意义。
 **不用最大值**：最大值由缓存里最旧的一条决定，扫描落地时几乎不变，
 按钮看起来像没反应。
 
-重新扫描的流程是 `cmd wifi start-scan` 后轮询 `collect.sh scan`，
-间隔 400 / 600 / 800 / 1000×6 ms，用 age 最小值是否下降（阈值 1 秒）判断新鲜度。
-中位数用于描述整份缓存的新旧，不作为“是否扫到新结果”的判据。
+页面**不触发扫描**。`cmd wifi start-scan` 在真机上返回 0 却不产生任何新结果
+（`ScanRequestProxy` 只放行前台应用），因此按钮被移除，只读系统缓存，
+并把缓存年龄（中位数 + 最小值）显示在「链路与网络」里。需要新数据时打开一次
+系统 WLAN 页面即可——那是唯一被验证有效的触发方式。
 
-## BSSID 脱敏与恢复
+## BSSID 脱敏
 
 Android 12+ 把框架返回的 BSSID 第 3、4 段抹成 `**`：
 
@@ -145,29 +160,12 @@ Android 12+ 把框架返回的 BSSID 第 3、4 段抹成 `**`：
 68:19:**:**:37:c3
 ```
 
-页面以 root 运行，`collect.sh` 在**检测到 `**` 时**才读 `wpa_supplicant` 的
-`scan_results`，用保留的前两段与后两段匹配：
+这是**没有定位权限就必然发生**的框架行为，root 也不例外。页面把脱敏值原样显示，
+不尝试还原：可用的两条路都不成立——`wpa_cli` 在 AIDL supplicant 上不回包
+（每次 10 秒，见上），`iw` 在零售 ROM 上通常不存在。
 
-- 同频率 + 前缀后缀吻合 → 唯一候选
-- 多个候选 → 取 RSSI 最接近的（同频同前缀时的取舍）
-- 没有吻合 → 同频最近的一个，差距超过 6 dB 放弃
-- 拿不到 `wpa_cli` → 保留脱敏值，**不编造**
-
-socket 目录依次探测：
-
-```
-/data/vendor/wifi/wpa/sockets
-/data/misc/wifi/sockets
-/data/vendor/wifi/sockets
-```
-
-读不到结果时触发一次 `wpa_cli scan`，按 0.2 / 0.4 / 0.8 s 退避重读，最坏 1.4 s。
-旧版本在三个目录上各 `sleep 2` 两次，即使设备没有 `wpa_cli` 也要付 8 秒。
-
-### 顺带修 SSID
-
-框架的 SSID 列会补空格并按字节截断，截断点落在多字节字符中间时，中文名会变成
-“首字 + 替换符”。`scan_results` 是原始字节，两者不一致时优先用它。
+脱敏不影响任何诊断结论：分组、信道占用、DFS、干扰评分都只用频率与 RSSI，
+BSSID 仅用于区分“同一 SSID 的多台设备”，脱敏后仍能区分。
 
 ## DFS 与「扫到 ch100」
 
@@ -193,13 +191,9 @@ ch100-144 属 **UNII-2C（5470-5725 MHz）**，在美国与 UNII-2A（52-64）�
 1. 扫到的 100-144 为 0 → 射频层过滤，或附近真没有
 2. 不为 0 → 信道可用；UI 看不到属于展示 / 缓存问题，手动添加网络即可连
 
-命令行等价输出：
-
-```sh
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'
-```
-
-看 `bss_unii2c`：为 0 说明固件信道表里没有 UNII-2C，**没有任何国家码设置能让它出现**。
+在 WebUI 的「国家码」页点「运行完整诊断」。报告只在页面详情面板与控制台里，
+不写日志文件。看 `bss_unii2c`：为 0 说明固件信道表里没有 UNII-2C，
+**没有任何国家码设置能让它出现**。
 
 ### 被动扫描的额外限制
 
@@ -210,7 +204,7 @@ su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh diagnose'
 ## 按 SSID 分组
 
 同一个网络名常由多个射频提供（mesh、中继、路由器的 2.4G 与 5G 同名）。
-信道页按 SSID 分组，组内按 RSSI、信道排序，组间按最强成员排序：
+概览页的 AP 列表按 SSID 分组，组内按 RSSI、信道排序，组间按最强成员排序：
 
 ```
         My WiFi
@@ -220,25 +214,7 @@ aa:bb:cc:dd:ee:02   6    2437   -61   普通
 
 这样同名 AP 的 BSSID、频段、信号一眼可见，不需要展开或翻页。
 
-## 硬件能力
-
-`capacity.sh` 让设备自己回答三件事：
-
-| 项 | 前提 | 常见结果 |
-|---|---|---|
-| `survey` | 驱动实现 `NL80211_CMD_GET_SURVEY` | 高通 `qcacld` 多半没有，`iw survey dump` 为空 |
-| `monitor` | 支持监听模式 | 原厂固件通常关闭 |
-| `injection` | 监听模式 + 固件允许注入 | 原厂固件一律关闭 |
-
-```sh
-su -c 'sh /data/adb/modules/KsuFastSurfing/manager.sh capacity'
-```
-
-WebUI 的「硬件能力」卡片调同一个脚本。三项都是“不支持”时，就不必往频谱仪 /
-deauth 方向投入；`monitor=yes` 但 `monitor_creatable=no` 说明驱动声明了却没实现，
-这类“看起来能做”比直接不支持更容易浪费时间，页面单独标红。
-
-### 频谱仪与 deauth 的可行性
+## 频谱仪与 deauth 的可行性
 
 结论：**内置射频做不了频谱仪，也做不了 deauth**。不是代码量问题，是硬件前提。
 
@@ -256,7 +232,7 @@ deauth 方向投入；`monitor=yes` 但 `monitor_creatable=no` 说明驱动声�
 3. **真正的频谱仪**：每 MHz 的功率曲线，需要监听模式逐包取 RSSI，或外接 SDR
 
 `iw` 在零售 ROM 上不存在，所以本项目不假设它可用：能查的只有
-`/sys/kernel/debug/ieee80211/` 下驱动暴露的节点，和 `wpa_cli signal_poll` 的 `NOISE=`。
+`/sys/kernel/debug/ieee80211/` 下驱动暴露的 `survey*` 节点。
 两者都拿不到时，结论是“未确认”，不是“支持”。
 
 关于 deauth：即便硬件支持，本模块也不会实现。抓包注入是在别人的网络上主动干扰，

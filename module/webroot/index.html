@@ -23,11 +23,10 @@
   header { padding:16px 16px 10px; }
   h1 { font-size:17px; margin:0; letter-spacing:.2px; }
   .sub { color:var(--dim); font-size:12px; margin-top:3px; }
-  /* Sticky tabs need an opaque backdrop or content shows through while
-     scrolling. Inheriting the page colour keeps it consistent with whatever
-     background the manager gave us, in both light and dark. */
-  nav { display:flex; gap:6px; padding:8px 16px 12px; position:sticky; top:0;
-        background:inherit; z-index:5; }
+  /* The tab bar scrolls away with the header. Pinning it cost a fifth of a
+     phone screen and covered the first card's title; the tabs are one flick
+     from the top and nothing here is long enough to need them mid-scroll. */
+  nav { display:flex; gap:6px; padding:8px 16px 12px; }
   nav button { flex:1; padding:9px 4px; border-radius:9px; border:1px solid var(--line);
                background:transparent; color:var(--dim); font-size:12.5px; font-weight:600; }
   nav button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -48,6 +47,24 @@
   .hosts div span { display:block; }
   .hosts .n { font-size:19px; font-weight:700; }
   .hosts .l { font-size:10.5px; color:var(--dim); margin-top:2px; }
+  .rt { font-size:12.5px; font-variant-numeric:tabular-nums; }
+  .rt-h, .rt-r { display:grid; grid-template-columns:1.4fr 1fr .9fr; gap:6px; padding:5px 0;
+                 border-bottom:1px solid var(--line); }
+  .rt-h { color:var(--dim); font-size:11px; font-weight:600; }
+  .rt-r:last-child { border-bottom:none; }
+  .rt-r span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rt-r .d { font-weight:600; }
+  .grid3 { display:grid; grid-template-columns:1.2fr 1fr .7fr; gap:8px; margin-bottom:10px; }
+  .fld { display:block; }
+  .fld span { display:block; color:var(--dim); font-size:11px; margin-bottom:4px; }
+  .hostsview { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px;
+               line-height:1.6; white-space:pre-wrap; word-break:break-all; max-height:240px;
+               overflow:auto; color:var(--dim); }
+  .hostsview b { color:inherit; font-weight:600; }
+  .dnslist { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px;
+             line-height:1.7; max-height:200px; overflow:auto; margin-top:6px; }
+  .dnslist span { display:inline-block; min-width:118px; }
+  .dnslist i { color:var(--dim); font-style:normal; }
   .bar { height:7px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:4px; }
   .bar i { display:block; height:100%; background:var(--accent); border-radius:4px; }
   table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
@@ -142,7 +159,14 @@
   .status.ok #status-text { color:var(--ok); }
   .status.bad #status-text { color:var(--bad); }
   .status.warn #status-text { color:var(--warn); }
-  body { padding-bottom:88px; }   /* room for the fixed bar */
+  /* Console: the page's own transcript. It is plain text on purpose - it has to
+     stay copyable, and every coloured span is one more node the WebView must
+     lay out while commands are still arriving. */
+  .console { max-height:58vh; min-height:220px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+             font-size:10.5px; line-height:1.5; white-space:pre-wrap; word-break:break-all; }
+  .console .hint { color:var(--dim); }
+
+  body { padding-bottom:104px; }  /* room for the fixed bar and one more row */
 </style>
 </head>
 <body>
@@ -154,9 +178,9 @@
 
 <nav>
   <button id="tab-ov" class="on">概览</button>
-  <button id="tab-ap">信道</button>
   <button id="tab-hs">hosts</button>
   <button id="tab-cc">国家码</button>
+  <button id="tab-con">控制台</button>
 </nav>
 
 <!-- One status bar for the whole page. Long operations used to report into a
@@ -173,7 +197,7 @@
 <!-- ================= 概览 ================= -->
 <section class="page on" id="p-ov">
   <div class="card">
-    <h2>当前连接 <button class="mini" id="btn-scan">重新扫描</button></h2>
+    <h2>当前连接</h2>
     <div class="row"><span class="k">SSID</span><span class="v" id="o-ssid">—</span></div>
     <div class="row"><span class="k">频率 / 信道</span><span class="v" id="o-freq">—</span></div>
     <div class="row"><span class="k">信号</span><span class="v" id="o-rssi">—</span></div>
@@ -204,33 +228,34 @@
   <div class="card">
     <h2>链路与网络</h2>
     <div class="row"><span class="k">扫描新鲜度</span><span class="v" id="n-age">—</span></div>
+    <div class="row"><span class="k">本机地址</span><span class="v" id="n-addr">—</span></div>
     <div class="row"><span class="k">网关</span><span class="v" id="n-gw">—</span></div>
+    <div class="row"><span class="k">子网掩码</span><span class="v" id="n-mask">—</span></div>
     <div class="row"><span class="k">丢包</span><span class="v" id="n-loss">—</span></div>
     <div class="row"><span class="k">网关 RTT</span><span class="v" id="n-rtt">—</span></div>
-    <div class="row"><span class="k">DNS / 出网</span><span class="v" id="n-dns">—</span></div>
+    <div class="row"><span class="k">出口 IP</span><span class="v" id="n-cip">—</span></div>
+    <div class="row"><span class="k">出口 DNS</span><span class="v" id="n-dip">—</span></div>
+    <div class="row"><span class="k">DNS 判定</span><span class="v" id="n-dns">—</span></div>
     <div class="row"><span class="k">同 SSID 多 BSSID</span><span class="v" id="n-roam">—</span></div>
   </div>
 
   <div class="card">
-    <h2>信号最强的周边 AP</h2>
-    <table>
-      <thead><tr><th>SSID</th><th>信道</th><th class="n">RSSI</th></tr></thead>
-      <tbody id="o-best"></tbody>
-    </table>
+    <h2>路由表</h2>
+    <div class="rt"><div class="rt-h"><span>目标</span><span>网关</span><span>接口</span></div>
+      <div id="n-routes"></div></div>
+    <div class="muted">来自 `ip route`。没有 default 行时，页面会用 `ip route get 1.1.1.1` 补一条。</div>
   </div>
-</section>
 
-<!-- ================= 信道 ================= -->
-<section class="page" id="p-ap">
   <div class="card">
     <h2>全部 AP <span class="tag" id="ap-count">—</span></h2>
     <!-- Grouped by network name, because one name is usually served by several
-         radios (mesh, repeater, one router on 2.4 and 5GHz). A flat list of
-         SSIDs hid every radio but the strongest. -->
+         radios (mesh, repeater, one router on 2.4 and 5GHz). Groups are ordered
+         by their strongest member; rows inside a group by signal too. -->
     <div class="ap-head"><span>BSSID</span><span>ch</span><span>MHz</span><span>RSSI</span><span>类型</span></div>
     <div id="ap-groups"></div>
-    <div class="muted">同名 AP 归为一组，组内按信号从强到弱。DFS 为雷达共存信道（52-64 / 100-144），默认被动扫描，发现更慢。</div>
+    <div class="muted">按信号从强到弱。同名 AP 归为一组，组内同样按信号排。DFS 为雷达共存信道（52-64 / 100-144），默认被动扫描，发现更慢。</div>
   </div>
+
   <div class="card">
     <h2>DFS 分带</h2>
     <div class="row"><span class="k">可见 DFS AP</span><span class="v" id="d-ndfs">—</span></div>
@@ -239,15 +264,7 @@
     <div class="row"><span class="k">DFS 信道</span><span class="v" id="d-ch">—</span></div>
     <div class="muted">UNII-2C 才是信道 100 所在的那一段。两者分开计数，因为只有 100-144 能回答问题"能不能用 ch100"。</div>
   </div>
-  <div class="card">
-    <h2>硬件能力 <button class="mini" id="btn-cap">检测</button></h2>
-    <div class="row"><span class="k">噪声 / 信道占用</span><span class="v" id="cap-survey">—</span></div>
-    <div class="row"><span class="k">监听模式</span><span class="v" id="cap-mon">—</span></div>
-    <div class="row"><span class="k">帧注入</span><span class="v" id="cap-inj">—</span></div>
-    <div class="row"><span class="k">驱动</span><span class="v" id="cap-drv">—</span></div>
-    <div class="row"><span class="k">外接网卡</span><span class="v" id="cap-ext">—</span></div>
-    <div class="muted">这三项由驱动决定，不是开关。噪声/占用要 nl80211 survey；监听模式和帧注入要固件支持。点「检测」让设备自己回答，不要靠机型推测。</div>
-  </div>
+
 </section>
 
 <!-- ================= hosts ================= -->
@@ -257,30 +274,36 @@
     <div class="row"><span class="k">条目</span><span class="v" id="h-user">—</span></div>
     <div class="row"><span class="k">生效条目</span><span class="v" id="h-entries">—</span></div>
     <div class="row"><span class="k">/system/etc/hosts</span><span class="v" id="h-mount">—</span></div>
+    <div class="row"><span class="k">实际生效</span><span class="v" id="h-active">—</span></div>
   </div>
 
   <div class="card">
-    <h2>检测 IP <span class="tag" id="h-state">空闲</span></h2>
-    <div class="grid2">
-      <div>
-        <label class="f">超时 (秒)</label>
-        <input type="number" id="h-timeout" min="1" max="10" step="1">
-      </div>
-      <div>
-        <label class="f">并发线程</label>
-        <input type="number" id="h-threads" min="1" max="16" step="1">
-      </div>
+    <h2>hosts 条目 <button class="mini" id="h-edit">编辑</button></h2>
+    <div id="h-view" class="hostsview">—</div>
+    <div id="h-editbox" hidden>
+      <textarea id="h-manual" placeholder="1.2.3.4  example.com&#10;5.6.7.8  another.host"></textarea>
+      <button class="act" id="h-save">保存并应用</button>
     </div>
-    <button class="act" id="h-probe">检测 IP（结果写入下方编辑框）</button>
-    <div class="muted">只检测、不写文件。检测完把地址追加到下面的编辑框，确认无误再点「保存并应用」。</div>
-    <pre id="h-log" hidden></pre>
+    <div class="muted">只读视图是当前生效的 /system/etc/hosts。点「编辑」修改你自己的条目，
+      保存后写入 user-hosts 并重新挂载，点下去立即生效。</div>
   </div>
 
   <div class="card">
-    <h2>hosts 条目</h2>
-    <textarea id="h-manual" placeholder="1.2.3.4  example.com&#10;5.6.7.8  another.host"></textarea>
-    <button class="act" id="h-save">保存并应用</button>
-    <div class="muted">写入 user-hosts 并重新挂载 /system/etc/hosts。检测结果不会自动生效。</div>
+    <h2>DNS 解析</h2>
+    <div class="grid3">
+      <label class="fld"><span>域名</span>
+        <input type="text" id="d-host" value="google.com" autocapitalize="none" spellcheck="false"></label>
+      <label class="fld"><span>DNS 服务器</span>
+        <input type="text" id="d-server" value="8.8.8.8" autocapitalize="none" spellcheck="false"></label>
+      <label class="fld"><span>次数</span>
+        <input type="number" id="d-count" value="64" min="1" max="256" step="1"></label>
+    </div>
+    <button class="act" id="d-run">开始解析</button>
+    <div class="row"><span class="k">独立 IP</span><span class="v" id="d-hits">—</span></div>
+    <div class="row"><span class="k">进度</span><span class="v" id="d-prog">—</span></div>
+    <div id="d-list" class="dnslist"></div>
+    <div class="muted">直接发 UDP 查询到指定服务器，每个返回的 A 记录按出现次数排序。
+      次数越多越能看到 CDN 轮转出的不同地址。</div>
   </div>
 </section>
 
@@ -310,21 +333,83 @@
   </div>
 </section>
 
+<!-- ================= 控制台 ================= -->
+<section class="page" id="p-con">
+  <div class="card">
+    <h2>控制台 <span class="tag" id="con-count">0 命令 · 0 失败</span></h2>
+    <div class="grid2">
+      <button class="mini" id="con-clear">清空</button>
+      <button class="mini" id="con-copy">复制全部</button>
+    </div>
+    <label class="sw">自动滚动<input type="checkbox" id="con-auto" checked></label>
+    <pre id="con" class="console">等待命令…</pre>
+    <div class="muted">页面发出的每一条命令、退出码、耗时与输出摘要都在这里。模块里没有后台采集脚本：读扫描、诊断、写 hosts、改国家码，全部由这个页面直接驱动。</div>
+  </div>
+</section>
+
 <script src="diag.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 let MODDIR = '/data/adb/modules/KsuFastSurfing';
-let MGR = MODDIR + '/manager.sh';
-/* ---------- status reporting ----------
-   One channel for every operation, visible from any tab. `out()` used to
-   write into a <pre> that lived only inside the country-code tab, so a button
-   pressed on the hosts tab produced no visible feedback at all.
+let lastDiag = null;
+let userActed = false;
 
-   st(text)          - plain message, no progress
-   st(text, {run})   - long operation: pulsing dot + progress bar
-   st(text, {pct})   - progress bar at a given percentage
-   st(text, {ok})    - finished, coloured
-   The raw command output still goes to the country-code <pre> for detail. */
+/* ================= console =================
+   Every command the page runs, its exit code, its duration and a short
+   transcript of its output. This is the only place the device is driven from:
+   there is no collector script left in the module, so if a number is on screen,
+   the command that produced it is in this pane. */
+const CON_MAX = 800;
+let conLines = [], conBuf = [], conTimer = 0, conCmds = 0, conErrs = 0;
+
+function klog(kind, text) {
+  const d = new Date();
+  const ts = [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map(n => String(n).padStart(2, '0')).join(':') + '.' +
+    String(d.getMilliseconds()).padStart(3, '0');
+  const prefix = kind === 'cmd' ? '$ ' : kind === 'err' ? '! ' :
+                 kind === 'ok' ? '→ ' : kind === 'warn' ? '~ ' :
+                 kind === 'out' ? '  ' : '· ';
+  String(text == null ? '' : text).split('\n').forEach((l, i) => {
+    conBuf.push(ts + '  ' + (i ? '      ' : prefix) + l);
+  });
+  console.log('[KsuFastSurfing] ' + kind + ' ' + text);
+  if (!conTimer) conTimer = setTimeout(conFlush, 60);
+}
+
+function conFlush() {
+  conTimer = 0;
+  const box = $('con');
+  if (conBuf.length) {
+    conLines = conLines.concat(conBuf);
+    conBuf = [];
+    if (conLines.length > CON_MAX) conLines = conLines.slice(-CON_MAX);
+    if (box) {
+      box.textContent = conLines.join('\n');
+      if (!$('con-auto') || $('con-auto').checked) box.scrollTop = box.scrollHeight;
+    }
+  }
+  const tag = $('con-count');
+  if (tag) tag.textContent = conCmds + ' 命令 · ' + conErrs + ' 失败';
+}
+
+/* Keep the pane usable when a command returns a wall of text (scan results are
+   tens of kilobytes). The full transcript is not kept: the summary is what the
+   operator needs to see what ran and whether it worked. */
+function summarize(out) {
+  const s = String(out == null ? '' : out).replace(/\s+$/, '');
+  if (!s) return '无输出';
+  const lines = s.split('\n');
+  const bytes = new TextEncoder().encode(s).length;
+  const head = lines.slice(0, 6).map(l => l.length > 200 ? l.slice(0, 200) + '…' : l);
+  let msg = head.join('\n');
+  if (lines.length > head.length) msg += '\n… 共 ' + lines.length + ' 行 / ' + bytes + ' 字节';
+  else msg += '\n(' + lines.length + ' 行 / ' + bytes + ' 字节)';
+  return msg;
+}
+
+/* ---------- status reporting ----------
+   One channel for every operation, visible from any tab. */
 function st(text, opt) {
   const o = opt || {};
   const bar = $('status'), fill = $('status-fill');
@@ -343,41 +428,99 @@ function st(text, opt) {
 }
 
 /* Detail pane only. This must never touch the status bar: doing so meant the
-   raw output of a *successful* probe overwrote the "5 / 12 可用" summary with
-   the first line of the script's stdout, so the result looked like a failure.
-   Callers drive the status bar with st() and only set a failure explicitly. */
+   raw output of a *successful* probe overwrote the summary with the first line
+   of a command's stdout, so the result looked like a failure. */
 const out = m => { $('out').textContent = m; };
 
 function hasKsu() {
   return typeof ksu !== 'undefined' && ksu !== null && typeof ksu.exec === 'function';
 }
 
+/* The bridge is byte-safe because the page wraps text commands in
+   `(cmd) 2>&1 | base64`. The console should show the command the operator
+   asked for and the text it produced, not the wrapper and a base64 blob. */
+function shownCmd(cmd) {
+  const m = String(cmd).match(/^\(([\s\S]*)\) 2>&1 \| base64$/);
+  const c = m ? m[1] : String(cmd);
+  /* A hosts save carries the whole editor as base64; printing it would bury
+     every other line. Show the target and the payload size instead. */
+  const w = c.match(/^printf %s (\S*) \| base64 -d > '([^']+)'/);
+  if (w) return 'writeFile ' + w[2] + '（' + w[1].length + ' base64 字符）';
+  return c.length > 300 ? c.slice(0, 300) + ' …' : c;
+}
+function shownOut(cmd, out) {
+  if (/\) 2>&1 \| base64\s*$/.test(String(cmd)) || /^base64 -w0 /.test(String(cmd))) {
+    try { return b64bytes(out); } catch (e) {}
+  }
+  return out;
+}
+
+/* The bridge starts one shell process per call. A page that fires the whole
+   startup set at once is fine, but a probe can queue dozens of curls; keep at
+   most six in flight so the device is not forking a dozen shells at once.
+   Commands wait their turn before they are logged, so the console shows the
+   order they actually ran in. */
+const EXEC_MAX = 6;
+let execLive = 0;
+const execQueue = [];
+function execSlot() {
+  if (execLive < EXEC_MAX) { execLive++; return Promise.resolve(); }
+  return new Promise(r => execQueue.push(r));
+}
+function execFree() {
+  const next = execQueue.shift();
+  if (next) next(); else execLive--;
+}
+
+/* The one transport. Every call is logged before it is sent and after it
+   returns, including failures and timeouts. */
 let seq = 0;
-function exec(cmd, options) {
-  return new Promise((resolve, reject) => {
-    if (!hasKsu()) { reject(new Error('KernelSU WebUI 接口不可用')); return; }
+async function exec(cmd, options) {
+  if (!hasKsu()) throw new Error('KernelSU WebUI 接口不可用');
+  await execSlot();
+  try {
+    return await new Promise((resolve, reject) => {
     const cb = '__ksu_cb_' + Date.now() + '_' + (seq++);
+    const t0 = performance.now();
     let done = false, timer = 0;
+    conCmds++;
+    klog('cmd', shownCmd(cmd));
+
     window[cb] = (errno, stdout, stderr) => {
       if (done) return;
       done = true;
-      clearTimeout(timer);          /* every call used to leave a live timer */
+      clearTimeout(timer);
       try { delete window[cb]; } catch (e) { window[cb] = undefined; }
+      const ms = Math.round(performance.now() - t0);
+      if (errno) conErrs++;
+      klog(errno ? 'err' : 'ok', 'rc=' + errno + ' · ' + ms + 'ms');
+      if (stdout) klog('out', summarize(shownOut(cmd, stdout)));
+      if (stderr && String(stderr).trim()) klog('err', summarize(stderr));
       resolve({ errno, stdout: stdout || '', stderr: stderr || '' });
     };
     try { ksu.exec(cmd, JSON.stringify(options || {}), cb); }
-    catch (e) { delete window[cb]; reject(e); }
+    catch (e) {
+      conErrs++;
+      klog('err', '无法发送命令：' + (e && e.message ? e.message : e));
+      delete window[cb];
+      reject(e);
+    }
     timer = setTimeout(() => {
       if (done) return;
       done = true;
+      conErrs++;
+      klog('err', '执行超时（120s）：' + cmd.slice(0, 120));
       try { delete window[cb]; } catch (e) { window[cb] = undefined; }
       reject(new Error('执行超时'));
     }, 120000);
-  });
+    });
+  } finally {
+    execFree();
+  }
 }
 
-/* stdout only. `run()` used to concatenate stderr, and loadStatus() parsed that
-   blend as key=value - any warning on stderr could be read as a field. */
+/* stdout only. A caller that parses key=value must never see stderr mixed in:
+   any warning would be read as a field. */
 async function run(cmd) {
   try {
     const r = await exec(cmd);
@@ -388,33 +531,17 @@ async function run(cmd) {
   }
 }
 
-/* Same, but silent: used for polling, where a transient failure must not write
-   anything into the detail pane. */
-async function runQuiet(cmd) {
-  try { const r = await exec(cmd); return r.stdout || ''; }
-  catch (e) { return ''; }
-}
-
-const delay = ms => new Promise(r => setTimeout(r, ms));
-
-/* UTF-8 -> base64 without the deprecated escape()/unescape() pair. */
-function b64utf8(text) {
-  const bytes = new TextEncoder().encode(String(text));
-  let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
-}
-
 async function resolveModDir() {
   if (!hasKsu() || typeof ksu.moduleInfo !== 'function') return;
   try {
     const info = JSON.parse(ksu.moduleInfo());
-    if (info && info.moduleDir) { MODDIR = info.moduleDir; MGR = MODDIR + '/manager.sh'; }
+    if (info && info.moduleDir) MODDIR = info.moduleDir;
   } catch (e) {}
 }
 
 /* ---------- tabs ---------- */
-const TABS = [['tab-ov','p-ov'],['tab-ap','p-ap'],['tab-hs','p-hs'],['tab-cc','p-cc']];
+const TABS = [['tab-ov','p-ov'],['tab-hs','p-hs'],
+              ['tab-cc','p-cc'],['tab-con','p-con']];
 TABS.forEach(([b,p]) => {
   $(b).onclick = () => {
     TABS.forEach(([b2,p2]) => {
@@ -442,17 +569,11 @@ function parseKV(txt) {
   return m;
 }
 
-/* Data comes from the page itself (see the DIAG block above): the bridge runs
-   commands as root, so no script is involved and no intermediate file has to
-   stay in sync. Never parse this text by splitting on a delimiter - SSIDs can
-   contain '|', '=', quotes and backslashes, and a real AP named "ap fake=1|2"
-   parsed as freq=2 ch=5745 rssi=149 under the old key=value format. */
-let lastDiag = null;
-
+/* ---------- data ---------- */
 async function loadDiag() {
   const d = await measure();
   if (d.error) {
-    out('未取得扫描数据（' + d.error + '）。先点「重新扫描」，或确认设备已联网。');
+    out('未取得扫描数据（' + d.error + '）。确认 Wi-Fi 已连接，或打开一次系统 WLAN 页再回来。');
     return false;
   }
   lastDiag = d;
@@ -481,7 +602,7 @@ function render(d) {
   setV($('o-dfs'), s.ndfs, s.ndfs > 0 ? 'ok' : '');
   $('o-note').textContent =
     v.dfs === 'ok' ? 'DFS 信道可见；若设置界面仍看不到，属于展示/缓存问题，手动添加网络即可连' :
-    v.dfs === 'none' ? '附近没有 DFS AP；可靠近路由器后重新扫描' :
+    v.dfs === 'none' ? '附近没有 DFS AP；可靠近路由器后再打开本页' :
     '完全没有扫到 5GHz';
 
   /* --- recommended channel --- */
@@ -499,28 +620,33 @@ function render(d) {
 
   /* --- link freshness + L3 --- */
   /* Median age, not the maximum: the maximum is set by the stalest neighbour
-     in the cache and hardly changes when a scan actually lands, which made the
-     button look broken. The minimum is shown alongside it as proof that new
-     results arrived. */
+     in the cache and barely changes when a scan lands, which made the button
+     look broken. The minimum is shown alongside it as proof that new results
+     arrived. */
   setV($('n-age'), (d.ageMed.toFixed(1) + ' 秒（最快 ' + d.ageMin.toFixed(1) +
        ' s）· ' + s.total + ' AP'),
        d.ageMed <= 15 ? 'ok' : (d.ageMed <= 40 ? 'warn' : 'bad'));
+  setV($('n-addr'), d.addr ? (d.addr + '/' + d.prefix) : '未获取');
   setV($('n-gw'), d.gateway || '未获取');
+  setV($('n-mask'), d.mask || '—');
   setV($('n-loss'), d.loss == null ? '—' : (d.loss + '%'),
        d.loss == null ? '' : (d.loss === 0 ? 'ok' : 'bad'));
   setV($('n-rtt'), d.rtt == null ? '—' : (d.rtt + ' ms'),
        d.rtt == null ? '' : (d.rtt <= 10 ? 'ok' : 'warn'));
-  setV($('n-dns'), v.dns === 'ok' ? '正常' : (v.dns === 'fail' ? '失败' : '未知'),
-       v.dns === 'ok' ? 'ok' : (v.dns === 'fail' ? 'bad' : ''));
+  setV($('n-cip'), d.clientIp || '未获取', d.clientIp ? 'ok' : 'bad');
+  setV($('n-dip'), d.dnsIp || '未获取', d.dnsIp ? '' : 'warn');
+  setV($('n-dns'), v.dns === 'ok' ? '正确' : (v.dns === 'bad' ? '不一致'
+       : (v.dns === 'fail' ? '出网失败' : '未知')),
+       v.dns === 'ok' ? 'ok' : (v.dns === 'bad' ? 'warn' : (v.dns === 'fail' ? 'bad' : '')));
+
+  $('n-routes').innerHTML = (d.routes || []).map(r =>
+    `<div class="rt-r"><span class="d">${esc(r.dest)}</span>
+     <span>${esc(r.gw) || '—'}</span><span>${esc(r.dev) || '—'}</span></div>`).join('')
+    || '<div class="rt-r"><span class="d">无路由数据</span><span>—</span><span>—</span></div>';
   setV($('n-roam'), d.roam.length ? (d.roam.length + ' 个 SSID') : '无',
        d.roam.length ? 'ok' : '');
 
-  /* --- strongest neighbours --- */
-  $('o-best').innerHTML = d.aps.slice(0, 5).map(a =>
-    `<tr><td>${esc(a.ssid) || '(隐藏)'}</td><td>${a.ch}</td>
-     <td class="n ${rssiBand(a.rssi).cls}">${a.rssi}</td></tr>`).join('') || '<tr><td>—</td></tr>';
-
-  /* --- channel page --- */
+  /* --- AP list, now on the overview --- */
   const curSsid = d.link.ssid || '';
   $('ap-count').textContent = s.total + ' AP · ' + d.groups.length + ' 个名称';
   $('ap-groups').innerHTML = d.groups.map(g => {
@@ -561,48 +687,64 @@ function fmtLoad(v) {
   return (v / 1e6).toFixed(1) + 'M';
 }
 
-
+/* Status is assembled in the page from the same files and commands the old
+   shell control plane used; there is no status subcommand left to call. */
 async function loadStatus() {
-  const r = await run('sh ' + MGR + ' status');
-  if (r === null) return false;
-  const m = parseKV(r);
+  const [hs, sysHs, cfg, cur, mnt] = await Promise.all([
+    readFile(MODDIR + '/hosts'),
+    readFile('/system/etc/hosts'),
+    readFile(MODDIR + '/config'),
+    countryCodeNow(),
+    shRaw("mount 2>/dev/null | grep ' /system/etc/hosts '")
+  ]);
 
-  setV($('h-user'), (m.user || 0) + ' 条');
-  setV($('h-entries'), (m.entries || 0) + ' 条');
-  setV($('h-mount'), m.mounted === '1' ? '已挂载' : '未挂载', m.mounted === '1' ? 'ok' : 'bad');
-  $('h-timeout').value = m.timeout || 3;
-  $('h-threads').value = m.threads || 8;
+  /* The editor is the mirror of user-hosts; counting it here avoids reading
+     the same file twice on every refresh (loadHosts already read it). */
+  const user = ($('h-manual').value || '')
+    .split('\n').filter(l => l.trim() && !/^[ \t]*#/.test(l)).length;
+  setV($('h-user'), user + ' 条');
+  setV($('h-entries'), countHosts(hs) + ' 条');
 
-  const want = (m.cc || 'US').toUpperCase();
-  const cur = (m.cur_cc || '').toUpperCase();
+  const mounted = (!!hs && !!sysHs && hs === sysHs) || /\/system\/etc\/hosts/.test(mnt || '');
+  setV($('h-mount'), mounted ? '已挂载' : '未挂载', mounted ? 'ok' : 'bad');
+
+  /* Read-only mirror of what is actually in effect. Shown separately from the
+     editor so it is obvious that one is the device's file and the other is
+     your draft; the view is never editable. */
+  $('h-view').textContent = (sysHs || hs || '').trim() || '（空）';
+  setV($('h-active'), countHosts(sysHs) + ' 条');
+
+  const kv = parseKV(cfg);
+  const want = (kv.CC || 'US').toUpperCase();
   setV($('c-want'), want);
   setV($('c-cur'), cur || '未获取', cur ? (cur === want ? 'ok' : 'warn') : 'bad');
   $('c-input').value = want;
+
   return true;
 }
 
 /* The editor holds exactly what will be written to user-hosts - there is no
    second layer to reconcile, so what the user sees is what gets mounted. */
 async function loadHosts() {
-  const r = await runQuiet('base64 -w0 ' + MODDIR + '/user-hosts 2>/dev/null');
-  const b = (r || '').trim().split('\n').pop();
-  if (!b) { $('h-manual').value = ''; return; }
-  try { $('h-manual').value = b64bytes(b); } catch (e) { $('h-manual').value = ''; }
+  const txt = await readFile(MODDIR + '/user-hosts');
+  $('h-manual').value = txt || '';
 }
 
-/* Full read: only used at startup and when an action explicitly asks for it.
-   It is deliberately NOT wired into busy()'s finally block any more - that
-   turned every button into a second, invisible full refresh. */
+/* The editor is collapsed by default: the common case is checking what is in
+   effect, and an 8-row textarea of IPs pushes the rest of the page off screen. */
+$('h-edit').onclick = () => {
+  const box = $('h-editbox'), shown = !box.hidden;
+  box.hidden = shown;
+  $('h-edit').textContent = shown ? '编辑' : '收起';
+  if (!shown) { $('h-manual').focus(); $('h-manual').scrollIntoView({ block: 'center' }); }
+};
+
+/* Full read: only used at startup and when an action explicitly asks for it. */
 async function refreshAll() {
   const [, ok] = await Promise.all([loadStatus(), loadDiag()]);
   if (!ok && lastDiag) render(lastDiag);   /* keep the last good picture */
   return ok;
 }
-
-/* Set once the user has started anything. The startup sequence registers its
-   own completion message, and without this guard that message would land on
-   top of a result the user had already triggered. */
-let userActed = false;
 
 function busy(btn, fn) {
   return async () => {
@@ -614,6 +756,7 @@ function busy(btn, fn) {
       await fn();
     } catch (e) {
       st('操作失败：' + (e && e.message ? e.message : e), { ok: false });
+      klog('err', '操作失败：' + (e && e.stack ? e.stack : e));
     } finally {
       btn.disabled = false;
       btn.textContent = label;
@@ -622,171 +765,146 @@ function busy(btn, fn) {
 }
 
 /* ---------- actions ---------- */
-/* Rescan: request it, then poll only the scan section until a fresher minimum
-   age appears. The old loop slept a full second and re-ran the whole
-   collection every round, so one round cost a second plus a full refresh. */
-$('btn-scan').onclick = busy($('btn-scan'), async () => {
-  const before = lastDiag ? lastDiag.ageMin : null;
-  st('正在请求扫描…', { running: true });
-  await runQuiet('cmd wifi start-scan');
-
-  const steps = [400, 600, 800, 1000, 1000, 1000, 1000, 1000, 1000];
-  let waited = 0;
-  for (const step of steps) {
-    await delay(step); waited += step;
-    st('扫描中… 已等 ' + (waited / 1000).toFixed(1) + 's',
-       { pct: Math.min(95, Math.round(100 * waited / 8000)) });
-    const rows = await measureScan();
-    if (!rows.length) continue;
-    if (before === null) break;
-    const ageMin = Math.min(...rows.map(r => r.age || 0));
-    if (ageMin + 1 < before) break;
-  }
-
-  const ok = await loadDiag();
-  if (!ok || !lastDiag) {
-    st('扫描后仍未取得数据，检查 Wi-Fi 是否连接', { ok: false });
-    return;
-  }
-  const fresh = before === null || lastDiag.ageMin + 1 < before;
-  st(fresh ? '扫描完成：最新条目 ' + lastDiag.ageMin.toFixed(1) + ' 秒，共 ' +
-             lastDiag.summary.total + ' 个 AP'
-           : '扫描没有回来新结果：缓存里最新的一条仍是 ' +
-             (before === null ? '未知' : before.toFixed(1) + ' 秒') +
-             '前。换个位置再试，或确认 Wi-Fi 已连接',
-     fresh ? { ok: true } : { ok: false, warn: true });
-});
-
+/* Rescan: request it, then poll only the scan table until a fresher minimum
+   age appears. No script, no fixed sleep beyond the bounded poll interval. */
 /* Append detection results without touching anything the user already wrote.
    A hostname already present keeps the user's value: the editor is the single
    source of truth, so rewriting a line would be an invisible edit. */
-function appendDetected(text) {
-  const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
-  if (!lines.length) return 0;
-  const cur = $('h-manual').value || '';
-  const have = new Set();
-  cur.split('\n').forEach(l => {
-    const p = l.trim().split(/\s+/);
-    if (p.length > 1 && !/^#/.test(p[0])) have.add(p[1].toLowerCase());
-  });
-  const add = [];
-  lines.forEach(l => {
-    const m = l.match(/^(\d+\.\d+\.\d+\.\d+)\t(\S+)$/);
-    if (!m) return;
-    const host = m[2].toLowerCase();
-    if (have.has(host)) return;
-    have.add(host);
-    add.push(m[1] + '\t' + m[2]);
-  });
-  if (!add.length) return 0;
-  $('h-manual').value = cur.replace(/\s+$/, '') + (cur.trim() ? '\n' : '') + add.join('\n');
-  return add.length;
-}
-
-/* Detection is read-only. probe.sh prints the winners, the page appends them to
-   the editor, and nothing touches the mounted file until 保存并应用. The log
-   pane is fed by reading probe.log while the command runs: a 20-second silent
-   button is indistinguishable from a hang. */
-async function runProbe() {
-  const t = clamp(+$('h-timeout').value, 1, 10);
-  const n = clamp(+$('h-threads').value, 1, 16);
-  $('h-timeout').value = t; $('h-threads').value = n;
-
-  await runQuiet('sed -i "s/^PROBE_TIMEOUT=.*/PROBE_TIMEOUT=' + t + '/;' +
-                 's/^PROBE_THREADS=.*/PROBE_THREADS=' + n + '/" ' + MODDIR + '/config');
-  await runQuiet('rm -f ' + MODDIR + '/probe.log');
-
-  const pane = $('h-log');
-  pane.hidden = false;
-  pane.textContent = '正在启动…';
-  $('h-state').textContent = '进行中';
-  st('检测中：正在解析域名…', { running: true });
-
-  /* Poll the log while the probe runs. One read at a time, bounded, and it
-     stops as soon as the script writes its `done` line. */
-  let done = false, polls = 0;
-  const watch = (async () => {
-    while (!done && polls++ < 90) {
-      const txt = (await runQuiet('cat ' + MODDIR + '/probe.log 2>/dev/null')).trim();
-      if (txt) {
-        pane.textContent = txt;
-        pane.scrollTop = pane.scrollHeight;
-        const last = txt.split('\n').pop();
-        st('检测中：' + last.replace(/^\[[^\]]*\]\s*/, ''), { running: true });
-        if (/\]\s*done\b/.test(last)) break;
-      }
-      await delay(800);
-    }
-  })();
-
-  const started = Date.now();
-  const r = await run('sh ' + MODDIR + '/probe.sh 2>&1');
-  done = true;
-  await watch;
-
-  const logTxt = (await runQuiet('cat ' + MODDIR + '/probe.log 2>/dev/null')).trim();
-  if (logTxt) { pane.textContent = logTxt; pane.scrollTop = pane.scrollHeight; }
-
-  if (r === null) {
-    $('h-state').textContent = '失败';
-    st('检测失败：无法执行命令', { ok: false });
-    return;
-  }
-
-  const lines = r.split('\n').map(l => l.trim())
-                 .filter(l => /^\d+\.\d+\.\d+\.\d+\t\S+$/.test(l));
-  const added = appendDetected(lines.join('\n'));
-  const skipped = lines.length - added;
-  const secs = ((Date.now() - started) / 1000).toFixed(0);
-  $('h-state').textContent = added ? '已追加 ' + added + ' 条' : '无新增';
-
-  if (!lines.length) {
-    st('检测结束（' + secs + 's）：没有可用地址，原因见上方日志', { ok: false, warn: true });
-  } else if (!added) {
-    st('检测结束（' + secs + 's）：' + lines.length + ' 个域名编辑框里已有，未覆盖', { ok: true });
-  } else {
-    st('检测结束（' + secs + 's）：' + added + ' 条已追加到编辑框' +
-       (skipped ? '，' + skipped + ' 条已存在未覆盖' : '') + '。确认后点「保存并应用」',
-       { ok: true });
-  }
-}
-
-$('h-probe').onclick = busy($('h-probe'), runProbe);
-
-/* The one button that changes state: write the editor verbatim, rebuild, mount. */
+/* The one button that changes what is mounted: write the editor verbatim,
+   merge it in the page, write both copies, then bind-mount them. */
 $('h-save').onclick = busy($('h-save'), async () => {
   const text = $('h-manual').value || '';
   const lines = text.split('\n').filter(l => l.trim() && !/^\s*#/.test(l)).length;
-  st('正在写入 ' + lines + ' 条并挂载…', { running: true });
+  st('正在写入 ' + lines + ' 条…', { running: true, pct: 10 });
 
-  const r = await run('printf %s ' + b64utf8(text) + ' | base64 -d > ' +
-                      MODDIR + '/user-hosts && sh ' + MGR + ' apply; echo "rc=$?"');
-  const rc = r === null ? null : (r.match(/^rc=(\d+)$/m) || [])[1];
-  if (rc !== '0') {
-    if (r !== null) out(r);
-    st('保存失败：' + (r === null ? '无法执行命令' : '写入或挂载出错，详情见「国家码」页'),
-       { ok: false });
-    return;
+  const w1 = await writeFile(MODDIR + '/user-hosts', text);
+  if (!w1.ok) { st('保存失败：无法写入 user-hosts', { ok: false }); return; }
+
+  const merged = mergeHosts(text, nowStamp());
+  st('正在生成 hosts（' + countHosts(merged) + ' 条生效）…', { running: true, pct: 35 });
+  const w2 = await writeFile(MODDIR + '/hosts', merged);
+  const w3 = await writeFile(MODDIR + '/system/etc/hosts', merged);
+  if (!w2.ok || !w3.ok) { st('保存失败：无法写入 hosts', { ok: false }); return; }
+
+  st('正在设置权限并挂载…', { running: true, pct: 60 });
+  const H = MODDIR + '/hosts', S = MODDIR + '/system/etc/hosts';
+  await shRaw('chmod 0644 ' + SHQ(H) + ' ' + SHQ(S) +
+              '; chown 0:0 ' + SHQ(H) + ' ' + SHQ(S) +
+              '; chcon u:object_r:system_file:s0 ' + SHQ(H) + ' ' + SHQ(S) + ' 2>/dev/null; true');
+
+  const targets = await mountTargets();
+  if (!targets.length) { st('保存失败：找不到 /system/etc/hosts', { ok: false }); return; }
+
+  let mounted = 0;
+  for (const t of targets) {
+    const r = await shRaw('umount ' + SHQ(t) + ' 2>/dev/null; mount -o bind ' + SHQ(H) + ' ' + SHQ(t) +
+                          ' && echo mounted=1 || echo mounted=0');
+    if (/mounted=1/.test(r)) mounted++;
+    else klog('warn', '挂载失败：' + t);
   }
+
+  st('正在读回状态…', { running: true, pct: 92 });
   await loadStatus();
-  st('已保存 ' + lines + ' 条并重新挂载', { ok: true });
+  if (mounted) {
+    $('h-editbox').hidden = true;
+    $('h-edit').textContent = '编辑';
+  }
+  if (mounted) st('已保存 ' + lines + ' 条并重新挂载（' + mounted + ' 个挂载点）', { ok: true });
+  else st('已写入 ' + lines + ' 条，但挂载失败；详情见控制台', { ok: false });
 });
+
+/* DNS burst. The count is the whole point - a single lookup returns one address
+   per round-robin group, so 64 queries are what exposes the CDN's spread. */
+$('d-run').onclick = busy($('d-run'), async () => {
+  const host = ($('d-host').value || '').trim();
+  const server = ($('d-server').value || '').trim();
+  const count = Math.max(1, Math.min(256, +$('d-count').value || 64));
+  $('d-count').value = count;
+
+  if (!/^[A-Za-z0-9._-]{1,253}$/.test(host) || !/\./.test(host)) {
+    st('域名不合法，例如 google.com', { ok: false }); return;
+  }
+  if (!/^[0-9.]{7,15}$/.test(server) && !/^[0-9A-Fa-f:]+$/.test(server)) {
+    st('DNS 服务器地址不合法，例如 8.8.8.8', { ok: false }); return;
+  }
+
+  $('d-list').innerHTML = '';
+  setV($('d-hits'), '—');
+  setV($('d-prog'), '0 / ' + count);
+
+  const r = await dnsBurst(host, server, count, 2500,
+    (done, total) => setV($('d-prog'), done + ' / ' + total),
+    (msg) => klog('info', msg));
+
+  if (r.error === 'write-failed') {
+    st('DNS 解析失败：无法写入临时查询报文（/tmp 不可写）', { ok: false }); return;
+  }
+  if (!r.ips.length) {
+    setV($('d-hits'), '0 个', 'bad');
+    st('DNS 解析无响应：确认服务器 ' + server + ' 可达、未被拦截', { ok: false }); return;
+  }
+
+  setV($('d-hits'), r.ips.length + ' 个', 'ok');
+  $('d-list').innerHTML = r.ips.map(x =>
+    `<div><span>${esc(x.ip)}</span><i>${x.hits} / ${r.rounds}</i></div>`).join('');
+  st('DNS 解析完成：' + host + ' → ' + r.ips.length + ' 个地址（' + r.rounds + ' 次查询）',
+     { ok: true });
+});
+
+/* /etc/hosts is usually a symlink to /system/etc/hosts. Mount each real path
+   once, decided here rather than in a shell helper. */
+async function mountTargets() {
+  const list = [];
+  for (const t of ['/system/etc/hosts', '/etc/hosts']) {
+    const real = (await shRaw('[ -e ' + SHQ(t) + ' ] && readlink -f ' + SHQ(t))).trim();
+    if (real && list.indexOf(real) < 0) list.push(real);
+  }
+  return list;
+}
 
 $('c-set').onclick = busy($('c-set'), async () => {
   const v = ($('c-input').value || '').trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(v)) { st('请输入两位国家码，例如 US', { ok: false }); return; }
-  st('正在把国家码设为 ' + v + '（属性 + cmd wifi 双通道）…', { running: true });
-  const r = await run('sh ' + MGR + ' set-cc ' + v + ' 2>&1');
-  if (r === null) { st('设置失败：无法执行命令', { ok: false }); return; }
-  out(r);
+
+  st('正在写配置…', { running: true, pct: 10 });
+  const cfgTxt = await readFile(MODDIR + '/config');
+  const w1 = await writeFile(MODDIR + '/config', setKV(cfgTxt, 'CC', v));
+  if (!w1.ok) { st('写入 config 失败', { ok: false }); return; }
+  const w2 = await writeFile(MODDIR + '/system.prop',
+    'ro.boot.wificountrycode=' + v + '\nro.product.wifi.country=' + v + '\n' +
+    'persist.sys.wifi.countrycode=' + v + '\nro.wifi.country_code=' + v + '\n');
+  if (!w2.ok) { st('写入 system.prop 失败', { ok: false }); return; }
+
+  st('正在注入属性…', { running: true, pct: 30 });
+  await shRaw('command -v resetprop >/dev/null 2>&1 && { ' +
+              'resetprop -n ro.boot.wificountrycode ' + v + '; ' +
+              'resetprop -n ro.product.wifi.country ' + v + '; ' +
+              'resetprop -n persist.sys.wifi.countrycode ' + v + '; ' +
+              'resetprop -n ro.wifi.country_code ' + v + '; } ; echo rc=$?');
+
+  /* Backoff, stop at the first success: a rejected code used to cost 10 s of
+     fixed sleeps before the user saw the same failure. */
+  st('正在应用运行时国家码…', { running: true, pct: 55 });
+  let ok = false, last = '';
+  for (const d of [0, 300, 600, 1200]) {
+    if (d) await delay(d);
+    last = await shRaw('cmd wifi force-country-code enabled ' + v + ' 2>&1');
+    if (!/rror|xception|not found|nknown|ailed/i.test(last)) { ok = true; break; }
+  }
+  if (!ok) klog('warn', 'cmd wifi force-country-code 未接受 ' + v + '：' + (last || '').trim());
+
+  /* iw is absent on retail images; this is a bonus layer, not a requirement. */
+  await shRaw('command -v iw >/dev/null 2>&1 && iw reg set ' + v + ' 2>&1; true');
+
   await loadStatus();
-  st('国家码已设为 ' + v + '。注意：能否看到 DFS 信道取决于射频与固件', { ok: true });
+  st(ok ? '国家码已设为 ' + v + '。能否看到 DFS 信道取决于射频与固件'
+        : '配置已写入 ' + v + '，但运行时接口未确认；重启后再看',
+     ok ? { ok: true } : { ok: false, warn: true });
 });
 
 $('c-auto').onclick = busy($('c-auto'), async () => {
   st('交还国家码控制权给系统…', { running: true });
-  const r = await run('cmd wifi force-country-code disabled 2>&1; echo done');
-  if (r === null) { st('失败：无法执行命令', { ok: false }); return; }
+  const r = await shRaw('cmd wifi force-country-code disabled 2>&1; echo rc=$?');
   out(r);
   await loadStatus();
   st('已恢复为系统自动判断', { ok: true });
@@ -794,81 +912,59 @@ $('c-auto').onclick = busy($('c-auto'), async () => {
 
 $('c-diag').onclick = busy($('c-diag'), async () => {
   st('运行四层诊断（framework / regdb / 驱动 / 射频）…', { running: true });
-  /* No `| head -60`: closing the pipe kills diagnose.sh with SIGPIPE and
-     truncates diagnose.log at the same line. Trim for display instead. */
-  const r = await run('sh ' + MGR + ' diagnose 2>&1');
-  if (r === null) { st('诊断失败：无法执行命令', { ok: false }); return; }
-  out(r.length > 6000 ? r.slice(0, 6000) + '\n…（完整输出见 diagnose.log）' : r);
-  st('诊断完成，完整输出见下方（含 diagnose.log）', { ok: true });
+  const d = await diagnoseLayers();
+  out(d.text);
+  st('诊断完成：framework=' + (d.current || '未知') +
+     ' · UNII-2C 可见 ' + d.unii2c + ' 个 · 5GHz ' + d.n5 + ' 个', { ok: true });
 });
 
 /* Hardware capability. The point is to let the device answer "can you do
    spectrum / deauth" instead of guessing from the model name: the same phone
    family ships with different radios, and the driver is what decides. */
-const CAP_WORDS = { yes: '支持', no: '不支持', unknown: '未确认' };
-function capWord(v) {
-  const s = CAP_WORDS[v];
-  return s ? s : (v && v !== 'none' ? v : '—');
-}
-function paintCap(kv) {
-  const set = (id, key, goodWhen) => {
-    const v = kv[key];
-    let txt = capWord(v), cls = '';
-    if (v === goodWhen) cls = 'ok';
-    else if (v === 'no') cls = 'warn';
-    else if (v === 'unknown') cls = 'warn';
-    if (key === 'survey' && v === 'yes' && kv.survey_channels)
-      txt += '（' + kv.survey_channels + ' 个信道）';
-    if (key === 'monitor' && v === 'yes' && kv.monitor_creatable === 'no')
-      { txt = '声明支持，但建不出接口'; cls = 'bad'; }
-    setV($(id), txt, cls);
-  };
-  set('cap-survey', 'survey', 'yes');
-  set('cap-mon', 'monitor', 'yes');
-  set('cap-inj', 'injection', 'yes');
-  /* Driver is a string, not a yes/no: render it directly instead of calling
-     set() with a sentinel and then overwriting the result two lines later. */
-  setV($('cap-drv'), (kv.soc && kv.soc !== 'unknown' ? kv.soc + ' · ' : '') +
-                     (kv.driver || '未知'), '');
-  setV($('cap-ext'), kv.external_adapter === 'yes' ? '已连接' : '无',
-       kv.external_adapter === 'yes' ? 'ok' : '');
-}
-
-$('btn-cap').onclick = busy($('btn-cap'), async () => {
-  st('正在检测射频能力…', { running: true });
-  const r = await run('sh ' + MGR + ' capacity --json 2>&1');
-  if (r === null) { st('检测失败：无法执行命令', { ok: false }); return; }
-  const kv = parseKV(r);
-  paintCap(kv);
-  out(r);
-  /* The values are the strings 'yes'/'no'/'unknown', and 'no' is truthy - the
-     first version of this check treated an explicit "unsupported" as support. */
-  if (kv.survey !== 'yes' && kv.monitor !== 'yes') {
-    st('已检测：这台设备无法给出噪声/频谱，也无法监听', { ok: false, warn: true });
-    return;
+$('con-clear').onclick = () => {
+  conLines = []; conBuf = []; conCmds = 0; conErrs = 0;
+  $('con').textContent = '（已清空）';
+  $('con-count').textContent = '0 命令 · 0 失败';
+};
+$('con-copy').onclick = async () => {
+  const txt = $('con').textContent || '';
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      await navigator.clipboard.writeText(txt);
+      st('控制台内容已复制', { ok: true });
+      return;
+    }
+    throw new Error('no clipboard');
+  } catch (e) {
+    try {
+      const r = document.createRange();
+      r.selectNodeContents($('con'));
+      const s = window.getSelection();
+      s.removeAllRanges(); s.addRange(r);
+      st('已选中控制台文本，长按复制', { warn: true });
+    } catch (e2) { st('复制失败：' + (e2 && e2.message ? e2.message : e2), { ok: false }); }
   }
-  const yes = [kv.survey === 'yes' && '噪声', kv.monitor === 'yes' && '监听',
-               kv.injection === 'yes' && '注入'].filter(Boolean);
-  st(yes.length ? '已检测：可用 ' + yes.join(' / ') : '已检测：能力受固件限制',
-     yes.length ? { ok: true } : { ok: false, warn: true });
-});
+};
 
-function clamp(v, a, b) { return isNaN(v) ? a : Math.max(a, Math.min(b, v)); }
 
 (async function init() {
+  klog('info', '页面启动');
   if (!hasKsu()) {
     out('未检测到 KernelSU WebUI 接口。请从管理器打开本模块的 WebUI。\n' +
-        '命令行：sh ' + MGR + ' diagnose');
+        '所有操作都在页面里完成，模块没有命令行入口。');
+    st('未检测到 WebUI 接口，请从管理器打开', { ok: false });
     return;
   }
   await resolveModDir();
+  klog('info', 'MODDIR=' + MODDIR);
   st('正在读取设备状态…', { running: true });
   await loadHosts();                       /* the editor first: it is local */
   const ok = await refreshAll();
   if (userActed) return;                   /* a real action owns the status bar */
   if (ok) st('就绪 · ' + MODDIR, { ok: true });
-  else    st('未取得扫描数据，点「重新扫描」或检查网络', { warn: true });
+  else st('未取得扫描数据：确认 Wi-Fi 已连接', { warn: true });
 })();
+
 </script>
 </body>
 </html>

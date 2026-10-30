@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 /* Regression tests for the in-page diagnostic parser (webroot/diag.js).
  *
- * The page now reads `cmd wifi list-scan-results` directly, so this parser is
- * the only thing standing between raw device output and every number on
- * screen. The cases below are the ones that broke during development, plus the
+ * The page reads `cmd wifi list-scan-results` directly, so this parser is the
+ * only thing standing between raw device output and every number on screen. The cases below are the ones that broke during development, plus the
  * hostile inputs the old delimiter protocol could not survive.
  *
  * Run: node tests/test-diag.js
@@ -18,7 +17,9 @@ const src = fs.readFileSync(path.join(ROOT, 'module/webroot/diag.js'), 'utf8');
    Function with exec injected so it can run in node without a DOM. */
 const api = new Function('exec', src + `
   return { parseScan, parseLink, analyse, scoreChannels, chanOf, isDfs, uniiOf,
-           rssiBand, fillMacs, parseWpa, b64bytes, sections, parseNet };
+           rssiBand, b64bytes, parseNet, routeText, mergeHosts,
+           countHosts, setKV, parseCC, parseEcho, prefixToMask, parseAddr,
+           parseRoutes, dnsQuery, dnsParseHex };
 `)(async () => ({ stdout: '', stderr: '', errno: 0 }));
 
 let failures = 0;
@@ -87,6 +88,11 @@ console.log('== UNII bands ==');
   eq('ch100 is UNII-2C', rows[1].unii, 'UNII-2C');
   eq('ch60 is UNII-2A', rows[2].unii, 'UNII-2A');
   eq('ch60 is DFS', rows[2].dfs, 1);
+  /* ch36-48 is UNII-1: counting it as UNII-2A inflated the (52-64) bucket. */
+  const low = api.parseScan(HDR +
+    '  aa:bb:cc:dd:ee:09       5180    -50(0:-50/1:-55)    2.0    U1       [RSN-PSK][ESS]\n');
+  eq('ch36 is UNII-1', low[0].unii, 'UNII-1');
+  eq('ch36 is not DFS', low[0].dfs, 0);
 }
 
 /* ---------- 5. connected link parsing ---------- */
@@ -161,7 +167,7 @@ console.log('== full analysis ==');
   eq('n5', d.summary.n5, 5);
   eq('ndfs', d.summary.ndfs, 2);
   eq('nunii2c', d.summary.nunii2c, 1);
-  eq('nunii2a', d.summary.nunii2a, 2);   /* ch36 and ch60 */
+  eq('nunii2a', d.summary.nunii2a, 1);   /* ch60 only; ch36 is UNII-1 */
   eq('dfs channels', d.dfsCh, [60, 100]);
 
   /* The link/L3 scalars must be carried through: they were dropped once and
@@ -214,54 +220,124 @@ console.log('== per-radio security ==');
 }
 
 
-/* ---------- 9. redacted BSSIDs and mangled SSIDs ---------- */
-console.log('== mac recovery ==');
+/* ---------- 9. redacted BSSIDs stay redacted ---------- */
+console.log('== bssid redaction ==');
 {
-  /* Android 12+ gives the page 68:19:**:**:37:c3 - the third and fourth octets
-     are the ones blanked, so a matching full address must read
-     68:19:xx:xx:37:c3. The complete address lives in wpa_supplicant, which the
-     page can read because it runs as root. */
+  /* Android 12+ blanks the middle two octets unless the caller holds location
+     access. There is no portable way to undo that from a shell (`wpa_cli` is
+     mute on the AIDL supplicant, `iw` is absent from retail ROMs), so the page
+     shows what the framework gives and never invents the rest. */
   const scan = HDR +
     '  68:19:**:**:37:c3       5785    -58(0:-59/1:-63)    11.1    Li5DAA9D1D        [RSN-PSK][ESS]\n' +
-    '  68:19:**:**:37:c2       5785    -70(0:-71/1:-75)    11.1    Li7E641E1C        [RSN-PSK][ESS]\n' +
     '  54:69:**:**:da:c0       2437    -69(0:-69/1:-83)    11.2    华科              [RSN-PSK][ESS]\n';
-
   const rows = api.parseScan(scan);
-  eq('masked kept as-is before merge', rows[0].bssid, '68:19:**:**:37:c3');
+  eq('masked address is kept verbatim', rows[0].bssid, '68:19:**:**:37:c3');
+  eq('masked rows still parse', rows.length, 2);
+  eq('ssid is not disturbed by the mask', rows[1].ssid, '华科');
+  eq('masked row still carries its band', api.rssiBand(rows[0].rssi).cls, 'ok');
+}
 
-  /* Listed weakest-first, and the levels are inverted relative to the row
-     order, so proximity alone would hand each row the wrong address. */
-  const wpa = api.parseWpa('bssid / frequency / signal level / flags / ssid\n' +
-    '68:19:cc:dd:37:c2\t5785\t-70\t[RSN-PSK]\tLi7E641E1C\n' +
-    '68:19:aa:bb:37:c3\t5785\t-58\t[RSN-PSK]\tLi5DAA9D1D\n' +
-    '54:69:aa:bb:da:c0\t2437\t-69\t[RSN-PSK]\t华科\n');
-  eq('supplicant rows parsed', wpa.length, 3);
+/* ---------- 9b. default route lives in another table ---------- */
+console.log('== gateway behind a per-network table ==');
+{
+  /* What Android actually prints on a connected phone: the on-link prefix and
+     nothing else. The old parser looked for `default` and gave up, so the
+     gateway card stayed empty and the gateway ping never ran. */
+  const onlink = '192.168.1.0/24 dev wlan0 proto kernel scope link src 192.168.1.13\n';
+  const got = '1.1.1.1 via 192.168.1.1 dev wlan0 table wlan0 src 192.168.1.13 uid 0\n';
+  const merged = api.routeText(onlink, got);
+  const net = api.parseNet(merged, '3 packets transmitted, 3 received, 0% packet loss\nrtt min/avg/max/mdev = 2.1/3.4/5.0/0.4 ms\n', 'rc=0');
+  eq('gateway recovered from ip route get', net.gateway, '192.168.1.1');
+  eq('iface recovered too', api.parseNet(merged, '', '').gateway, '192.168.1.1');
+  ok('the synthetic line is a real default', /^default via 192\.168\.1\.1 dev wlan0$/m.test(merged), merged);
 
-  const fixed = api.fillMacs(rows, wpa);
-  eq('all masked resolved', fixed, 3);
-  eq('prefix+suffix pin', rows[0].bssid, '68:19:aa:bb:37:c3');
-  eq('sibling on same channel not crossed', rows[1].bssid, '68:19:cc:dd:37:c2');
-  eq('chinese name intact', rows[2].ssid, '华科');
+  /* A table that already has a default is passed through untouched. */
+  const withDef = 'default via 10.0.0.1 dev wlan0\n192.168.1.0/24 dev wlan0 proto kernel\n';
+  eq('existing default is not duplicated', api.routeText(withDef, got), withDef);
+  /* Nothing usable: keep the original text rather than inventing a route. */
+  eq('no gateway anywhere leaves the text alone', api.routeText(onlink, ''), onlink);
+}
 
-  /* Two radios on one channel under one vendor prefix, both at the same level,
-     and the supplicant lists them in the reverse of the page's order. Only the
-     octets that survived redaction can decide this. */
-  const dup = api.parseScan(HDR +
-    '  68:19:**:**:3b:21       5825    -60(0:-60/1:-87)  11.0  Li106B67FC  [RSN-PSK]\n' +
-    '  68:19:**:**:3b:20       5825    -60(0:-60/1:-87)  11.0  liC41CD1D9  [RSN-PSK]\n');
-  const dupWpa = api.parseWpa('h\n' +
-    '68:19:bb:cc:3b:20\t5825\t-60\t[RSN-PSK]\tliC41CD1D9\n' +
-    '68:19:aa:bb:3b:21\t5825\t-60\t[RSN-PSK]\tLi106B67FC\n');
-  api.fillMacs(dup, dupWpa);
-  eq('suffix pin disambiguates', dup.map(r => r.bssid),
-     ['68:19:aa:bb:3b:21', '68:19:bb:cc:3b:20']);
-  eq('no address reused', new Set(dup.map(r => r.bssid)).size, 2);
+/* ---------- 9c. outbound echo page ---------- */
+console.log('== outbound echo page ==');
+{
+  /* The page is HTML written for humans, in GBK. Addresses are picked out by
+     shape and by label, and the verdict sentence decides the DNS state. */
+  /* Real bytes captured from the server: GBK, as content-type says. */
+  const gbk = Buffer.from(
+    'xPq6w6Os1/C+tLXEzfjS19PDu6c8YnI+xPq1xElQtdjWt9DFz6I6IDM5Ljk2LjE5' +
+    'LjEyNSCxsb6pytA8YnI+xPq1xEROU7XY1rfQxc+iOiAzOS4xMDMuMjYuMjI5ILGxvqnK' +
+    '0Dxicj7E+rXERE5TyejWw9X9yLc=', 'base64');
+  const text = new TextDecoder('gbk').decode(new Uint8Array(gbk));
+  const e = api.parseEcho(text);
+  eq('client ip', e.client, '39.96.19.125');
+  eq('resolver ip', e.dns, '39.103.26.229');
+  eq('verdict', e.verdict, 'ok');
 
-  /* Nothing to merge: the redacted value must be left alone, never invented. */
-  const solo = api.parseScan(HDR +
-    '  68:19:**:**:37:c3       5785  -58  11.1  Solo  [RSN-PSK]\n');
-  eq('no supplicant leaves it masked', api.fillMacs(solo, []), 0);
-  eq('masked value unchanged', solo[0].bssid, '68:19:**:**:37:c3');
+  /* A wrong-resolver page must not read as success. */
+  const bad = api.parseEcho('您的IP地址信息: 1.2.3.4<br>您的DNS地址信息: 5.6.7.8<br>您的DNS设置错误');
+  eq('mismatch is reported', bad.verdict, 'bad');
+  eq('mismatch still yields addresses', bad.dns, '5.6.7.8');
+
+  /* No addresses at all: not a crash, an empty answer. */
+  const empty = api.parseEcho('<html>error</html>');
+  eq('nothing parsed, nothing invented', [empty.client, empty.dns], ['', '']);
+  eq('nothing parsed is unknown, not ok', empty.verdict, 'unknown');
+}
+
+/* ---------- 9d. mask and route table ---------- */
+console.log('== mask and routes ==');
+{
+  eq('/24', api.prefixToMask(24), '255.255.255.0');
+  eq('/0', api.prefixToMask(0), '0.0.0.0');
+  eq('/32', api.prefixToMask(32), '255.255.255.255');
+  eq('/20', api.prefixToMask(20), '255.255.240.0');
+  eq('out of range is refused', api.prefixToMask(40), '');
+
+  const a = api.parseAddr('2: wlan0: <BROADCAST> mtu 1500\n' +
+                          '    inet 192.168.1.13/24 brd 192.168.1.255 scope global wlan0\n');
+  eq('address and prefix', [a.addr, a.prefix, a.mask], ['192.168.1.13', 24, '255.255.255.0']);
+  eq('iface from the addr block', a.iface, 'wlan0');
+  eq('no inet line yields nothing', api.parseAddr('wlan0: no addresses').addr, '');
+
+  const rows = api.parseRoutes(
+    '192.168.1.0/24 dev wlan0 proto kernel scope link src 192.168.1.13\n' +
+    'default via 192.168.1.1 dev wlan0 proto static\n' +
+    '10.1.99.212/30 dev rmnet_data4 proto kernel scope link src 10.1.99.214\n');
+  eq('default first', rows[0].dest, 'default');
+  eq('gateway parsed', rows[0].gw, '192.168.1.1');
+  eq('on-link row has no gateway', rows[1].gw, '');
+  eq('source kept where present', rows[1].src, '192.168.1.13');
+  eq('three rows', rows.length, 3);
+}
+
+/* ---------- 9e. DNS wire format ---------- */
+console.log('== dns burst ==');
+{
+  /* Byte-for-byte against the same query dns.sh builds with od/awk. */
+  eq('google.com query bytes',
+     Buffer.from(api.dnsQuery('google.com', 1)).toString('hex'),
+     '00010100000100000000000006676f6f676c6503636f6d0000010001');
+
+  /* Labels longer than 63 bytes cannot be encoded; they are dropped instead of
+     producing a malformed packet. */
+  const long = Buffer.from(api.dnsQuery('a'.repeat(70) + '.com', 1)).toString('hex');
+  eq('over-long label is skipped', /03636f6d0000010001$/.test(long), true);
+
+  /* Shaped like a real reply, with a compression pointer in the answer name. */
+  const reply = '12348180000100010000000003777777' + '0667697468756203636f6d0000010001' +
+                'c00c000100010000012c0004' + '14cd2c02';
+  eq('compressed answer decodes', api.dnsParseHex(reply), ['20.205.44.2']);
+  ok('a header-only reply yields nothing', api.dnsParseHex('123481800000000000000000').length === 0);
+
+  /* CNAME then A: the name walk must skip the first record's rdata and still
+     find the address behind it. */
+  const cname = '12348180000100020000000003777777' + '0667697468756203636f6d0000010001' +
+                'c00c000500010000012c0002' + 'c010' +
+                'c010000100010000012c0004' + '14cd2c02';
+  eq('address behind a cname', api.dnsParseHex(cname), ['20.205.44.2']);
+  eq('garbage is not a crash', api.dnsParseHex('zzzz'), []);
+  eq('empty is not a crash', api.dnsParseHex(''), []);
 }
 
 /* ---------- 10. SSID bytes survive the bridge ---------- */
@@ -295,40 +371,6 @@ console.log('== freshness ==');
      useless for telling whether a rescan landed. */
   eq('age min', d.ageMin, 2);
   eq('age median', d.ageMed, 9);
-}
-
-/* ---------- 12. sectioned collection ---------- */
-console.log('== collect.sh sections ==');
-{
-  /* One exec returns every block; a parser must never need the raw concatenation
-     of two commands, and a missing block must degrade instead of throwing. */
-  const raw = '##scan\n' + HDR +
-    '  aa:bb:cc:dd:ee:01  5180  -50(0:-50/1:-55)  2.0  Home  [RSN-PSK]\n' +
-    '##link\nWifiInfo: SSID: "Home", RSSI: -50, Frequency: 5180MHz\n' +
-    '##route\ndefault via 192.168.1.1 dev wlan0 proto static\n' +
-    '##ping\n3 packets transmitted, 3 received, 0% packet loss\n' +
-    'rtt min/avg/max/mdev = 1.0/2.4/3.0/0.5 ms\n' +
-    '##dns\nrc=0\n' +
-    '##mac\n';
-  const sec = api.sections(raw);
-  eq('scan block', api.parseScan(sec.scan).length, 1);
-  eq('link block', api.parseLink(sec.link).ssid, 'Home');
-  const net = api.parseNet(sec.route, sec.ping, sec.dns);
-  eq('gateway from route', net.gateway, '192.168.1.1');
-  eq('loss from ping', net.loss, 0);
-  eq('rtt is the average', net.rtt, 2.4);
-  eq('dns from rc', net.dns, 'ok');
-  eq('empty mac section', api.parseWpa(sec.mac).length, 0);
-
-  const bare = api.sections('##scan\n');
-  eq('missing link', api.parseLink(bare.link || ''), null);
-  eq('missing gateway is not 0% loss', api.parseNet('', '', '').loss, null);
-  eq('missing dns is unknown', api.parseNet('', '', '').dns, 'unknown');
-
-  /* A block name inside payload text must not start a new section: SSIDs can
-     contain '##'. Only a line that is exactly ##name does. */
-  const tricky = api.sections('##scan\n  aa:bb:cc:dd:ee:01  5180  -50  1.0  ##wifi  [RSN]\n##link\n');
-  eq('## inside SSID is not a section', api.parseScan(tricky.scan)[0].ssid, '##wifi');
 }
 
 /* ---------- 13. one RSSI scale ---------- */

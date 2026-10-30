@@ -1,6 +1,6 @@
 id=KsuFastSurfing
 name=KsuFastSurfing
-version=v2.1
-versionCode=7
+version=v2.2
+versionCode=8
 author=Kreedb
-description=Professional WiFi diagnostics (channel / interference score / DFS / gateway loss / DNS) plus local-IP-probed hosts and a configurable Wi-Fi country code. Systemless.
+description=WebUI-only WiFi diagnostics (channel / interference / DFS / gateway loss / outbound IP and DNS), editable hosts with a DNS burst resolver, and a configurable Wi-Fi country code. No background scripts. Systemless.

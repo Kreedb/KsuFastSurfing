@@ -1,12 +1,15 @@
 #!/usr/bin/env node
-/* Tests for the WebUI's action flow and status feedback.
+/* Tests for the WebUI's action flow, with no shell script in the path.
  *
  * The rules this guards:
- *   - a button reports where the user can see it, from any tab;
+ *   - every command the page runs appears in the console tab;
+ *   - the page never executes a module .sh: all measurement and all state
+ *     changes are plain Android commands issued from the page;
  *   - detection is read-only: results go to the editor, never to a file;
- *   - one button applies, and nothing else changes mounted state;
+ *   - one button writes user-hosts, merges hosts in JS, and mounts;
+ *   - the country code is written to config + system.prop and applied;
  *   - a finished action must not trigger a second, invisible full refresh;
- *   - a rescan that returns the same cache says so instead of claiming success.
+ *   - there is no scan trigger left, and the AP list is on the overview.
  *
  * Run: node tests/test-status.js
  */
@@ -15,7 +18,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'module/webroot/index.html'), 'utf8');
-const js = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const js = html.match(/<script>\n(const \$ =[\s\S]*?)\n<\/script>/)[1];
 const diagSrc = fs.readFileSync(path.join(ROOT, 'module/webroot/diag.js'), 'utf8');
 
 /* Minimal DOM: just enough that the page's own code can run unmodified. */
@@ -23,6 +26,7 @@ function el(id) {
   return {
     id, textContent: '', className: '', value: '', checked: false, disabled: false,
     hidden: false, style: {}, innerHTML: '', onclick: null, onchange: null,
+    focus() {}, scrollIntoView() {},
     classList: { _s: new Set(), toggle(c, f) { f ? this._s.add(c) : this._s.delete(c); },
                  contains(c) { return this._s.has(c); } }
   };
@@ -33,61 +37,171 @@ global.btoa = s => Buffer.from(s, 'binary').toString('base64');
 global.atob = b => Buffer.from(b, 'base64').toString('binary');
 global.window = global;
 
-/* Every command the page issues, so tests can assert on the transport itself. */
-const seen = [];
-const capState = { json: 'survey=no\nmonitor=no\ninjection=no\n' };
-const capOut = () => capState.json;
+const store = {};
+global.localStorage = {
+  getItem: k => (k in store ? store[k] : null),
+  setItem: (k, v) => { store[k] = String(v); }
+};
 
-const SCAN_MASKED = 'BSSID  Frequency  RSSI  Age(sec)  SSID  Flags\n' +
-  '  aa:bb:**:**:ee:01  5180  -51(0:-51/1:-56)  7.5  Home  [RSN-PSK][ESS]\n';
-let scanOut = () => SCAN_MASKED;
+/* ---------- device state the mock answers from ---------- */
+const HDR = 'BSSID              Frequency      RSSI           Age(sec)     SSID                                 Flags\n';
+const SCAN = HDR +
+  '  68:19:aa:bb:cc:01  5180  -51(0:-51/1:-56)  7.5  Home  [RSN-PSK][ESS]\n' +
+  '  68:19:aa:bb:cc:02  5745  -66(0:-66/1:-71)  7.5  咖啡馆 5G  [RSN-PSK][ESS]\n';
+const LINK = 'WifiInfo: SSID: "Home", RSSI: -51, Link speed: 573Mbps, ' +
+             'Frequency: 5180MHz, Wi-Fi standard: 11ax\n';
+const ROUTE = 'default via 192.168.1.1 dev wlan0 proto static\n' +
+              '192.168.1.0/24 dev wlan0 proto kernel scope link src 192.168.1.5\n';
+const PING = '3 packets transmitted, 3 received, 0% packet loss, time 400ms\n' +
+             'rtt min/avg/max/mdev = 1.0/2.4/3.0/0.5 ms\n';
 
-const WPA = 'bssid / frequency / signal level / flags / ssid\n' +
-  'aa:bb:cc:dd:ee:01\t5180\t-51\t[RSN-PSK-CCMP][ESS]\tHome\n';
+const state = {
+  scan: SCAN,
+  link: LINK,
+  route: ROUTE,
+  ping: PING,
+  dns: 'rc=0\n',
+  curCC: 'Wifi Country Code: US\n',
+  userHosts: '1.1.1.1\tmtalk.google.com\n',
+  hosts: '# KsuFastSurfing - seed\n\n127.0.0.1\tlocalhost\n' +
+         '::1\tlocalhost ip6-localhost ip6-loopback\n',
+  sysHosts: '# android stock hosts\n',
+  config: 'CC=US\n',
+  systemProp: '',
+  domains: 'github.com\nmtalk.google.com\n',
+  mounted: false,
+  cmds: [],
+  writes: []
+};
 
-const b64 = s => Buffer.from(s, 'utf8').toString('base64') + '\n';
-const STATUS = 'WifiInfo: SSID: "Home", RSSI: -51, Link speed: 573Mbps, ' +
-               'Frequency: 5180MHz, Wi-Fi standard: 11ax\n';
-const MGR_STATUS = 'user=1\nentries=7\nmounted=1\ncc=US\ncur_cc=US\ntimeout=3\nthreads=8';
+const b64 = s => Buffer.from(String(s), 'utf8').toString('base64');
+const strip = cmd => {
+  const m = cmd.match(/^\(([\s\S]*)\) 2>&1 \| base64$/);
+  return m ? [m[1], true] : [cmd, false];
+};
 
-/* What collect.sh prints. One command, every block. */
-const collect = (scan) => '##scan\n' + scan +
-  '##link\n' + STATUS +
-  '##route\ndefault via 192.168.1.1 dev wlan0 proto static\n' +
-  '##ping\n3 packets transmitted, 3 received, 0% packet loss\n' +
-  'rtt min/avg/max/mdev = 1.0/2.4/3.0/0.5 ms\n' +
-  '##dns\nrc=0\n' +
-  '##mac\n' + WPA;
+const FILES = {
+  '/m/user-hosts': 'userHosts',
+  '/m/hosts': 'hosts',
+  '/system/etc/hosts': 'sysHosts',
+  '/m/config': 'config',
+  '/m/system.prop': 'systemProp',
+  '/m/domains': 'domains'
+};
 
-let userHosts = '1.1.1.1\tmtalk.google.com\n';
-let probeOut = '';
-let logOut = '';
-let applied = [];
+function answer(cmd) {
+  const [x, wrapped] = strip(cmd);
+  const B = s => (wrapped ? b64(s) : s);
+
+  if (/^base64 -w0 '([^']+)'/.test(cmd)) {
+    const f = cmd.match(/^base64 -w0 '([^']+)'/)[1];
+    return b64(FILES[f] ? state[FILES[f]] : '');
+  }
+
+  /* writeFile() funnels every text write into printf|base64 -d. */
+  const w = x.match(/printf %s (\S*) \| base64 -d > '([^']+)'/);
+  if (w) {
+    const body = Buffer.from(w[1], 'base64').toString('utf8');
+    state.writes.push({ path: w[2], body });
+    const key = FILES[w[2]];
+    if (key) state[key] = body;
+    return 'write=ok\n';
+  }
+
+  if (/cmd wifi list-scan-results/.test(x)) return B(state.scan);
+  if (/cmd wifi status/.test(x)) return B(state.link);
+  if (/^ip route/.test(x)) return B(state.route);
+  if (/^ping -c 3/.test(x)) return B(state.ping);
+  /* the outbound check is one HTTPS GET to the echo page; it answers in GBK */
+  if (/only-[a-z0-9]{32}\.nstool\.laiqukankan\.com/.test(x)) {
+    /* Real bytes from the server: content-type says GBK, so the base64 below is
+       GBK-encoded text, not UTF-8. Anything that decodes it as UTF-8 produces
+       mojibake and the labels stop matching. */
+    return 'xPq6w6Os1/C+tLXEzfjS19PDu6c8YnI+xPq1xElQtdjWt9DFz6I6IDM5Ljk2LjE5'
+         + 'LjEyNSCxsb6pytA8YnI+xPq1xEROU7XY1rfQxc+iOiAzOS4xMDMuMjYuMjI5ILGxvqnK'
+         + '0Dxicj7E+rXERE5TyejWw9X9yLc=';
+  }
+  if (/ip addr show dev/.test(x)) return B(
+    '2: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP\n' +
+    '    link/ether aa:bb:cc:dd:ee:ff brd ff:ff:ff:ff:ff:ff\n' +
+    '    inet 192.168.1.13/24 brd 192.168.1.255 scope global wlan0\n');
+  if (/cmd wifi get-country-code/.test(x)) return B(state.curCC);
+  if (/^mount 2>\/dev\/null \| grep ' \/system\/etc\/hosts '/.test(x))
+    return B(state.mounted ? '/m/hosts on /system/etc/hosts type none (rw,seclabel,bind)\n' : '');
+  if (/grep -c 'WCNSS_qcom_cfg'/.test(x)) return B('0\n');
+  if (/^\[ -e '([^']+)' \] && readlink -f/.test(x))
+    return B(x.match(/'([^']+)'/)[1] + '\n');
+  if (/mount -o bind/.test(x)) { state.mounted = true; return B('mounted=1\n'); }
+  if (/^umount/.test(x)) return B('');
+  if (/^chmod /.test(x)) return B('');
+
+  /* DNS: the packet is piped in, never written; the reply comes back as hex */
+  if (/printf %s [A-Za-z0-9+/=]+ \| base64 -d \| timeout \d+ nc -u -w \d+ '([^']+)' 53/.test(x)) {
+    return B('12348180000100020000000006676f6f676c6503636f6d0000010001' +
+             'c00c000100010000012c0004' + 'd04320c8' +
+             'c00c000100010000012c0004' + 'd04320ad' + '\n');
+  }
+
+  /* probe */
+  if (/ping -c 1 -W 1 '([^']+)'/.test(x) && /getent ahosts/.test(x)) {
+    const host = x.match(/ping -c 1 -W 1 '([^']+)'/)[1];
+    return B(host === 'github.com' ? '140.82.113.4\n' : '142.250.72.14\n');
+  }
+  /* DoH is queried alongside the system lookup, not as a fallback: it is the
+     only source that returns the whole A set. */
+  if (/cloudflare-dns\.com/.test(x)) {
+    const name = decodeURIComponent((x.match(/name=([^&']+)/) || [])[1] || '');
+    const set = name === 'github.com'
+      ? ['140.82.113.4', '140.82.112.4']
+      : ['142.250.72.14', '142.250.73.14'];
+    return B(JSON.stringify({ Answer: set.map(d => ({ type: 1, data: d })) }));
+  }
+  if (/dns\.google/.test(x)) return B(JSON.stringify({ Answer: [] }));
+  if (/command -v curl/.test(x)) return B('yes\n');
+  if (/curl .*--resolve/.test(x)) return B('0.032 0.081\n');
+
+  /* country code */
+  if (/force-country-code enabled/.test(x)) return B('');
+  if (/force-country-code disabled/.test(x)) return B('');
+  if (/^command -v resetprop/.test(x)) return B('rc=0\n');
+  if (/iw reg set/.test(x)) return B('');
+
+  /* diagnose */
+  if (/dumpsys wifi/.test(x)) return B('Current Country Code: US\n');
+  if (/settings get global wifi_country_code/.test(x)) return B('US\n');
+  if (/^\[ -r '.*' \] && grep/.test(x)) return B('');
+
+  /* capacity */
+  if (/^getprop ro\.soc\.model/.test(x)) return B('SM8650\n\nqcom\n');
+  if (/ls -d \/sys\/module/.test(x)) return B('/sys/module/qcacld\n');
+  if (/ls \/sys\/class\/net/.test(x)) return B('wlan0 p2p0 \n');
+  if (/ls -d \/sys\/class\/ieee80211/.test(x)) return B('1\n');
+  if (/command -v iw/.test(x)) return B('');
+  if (/find \/sys\/kernel\/debug\/ieee80211.*survey/.test(x)) return B('0\n');
+  if (/find \/sys\/kernel\/debug\/ieee80211.*interface_modes/.test(x)) return B('');
+  if (/nexmon/.test(x)) return B('');
+  if (/for d in \/sys\/class\/net\/\*\/device/.test(x)) return B('');
+
+  return B('');
+}
 
 global.ksu = {
   moduleInfo: () => JSON.stringify({ moduleDir: '/m' }),
-  exec(cmd, opt, cb) {
-    let out = '';
-    seen.push(cmd);
-    if (/probe\.log/.test(cmd)) out = logOut;
-    else if (/probe\.sh/.test(cmd)) out = probeOut;
-    else if (/collect\.sh scan/.test(cmd)) out = b64(scanOut());
-    else if (/collect\.sh/.test(cmd)) out = b64(collect(scanOut()));
-    else if (/manager\.sh status/.test(cmd)) out = MGR_STATUS;
-    else if (/base64 -w0 .*user-hosts|user-hosts 2>/.test(cmd)) out = b64(userHosts);
-    else if (/printf %s/.test(cmd)) { applied.push(cmd); out = 'rc=0\n'; }
-    else if (/manager\.sh apply/.test(cmd)) out = '';
-    else if (/capacity/.test(cmd)) out = capOut();
-    else if (/manager\.sh diagnose/.test(cmd)) out = 'diag output\n';
-    else if (/manager\.sh set-cc|force-country-code/.test(cmd)) out = 'cc=US\n';
-    setTimeout(() => global.window[cb](0, out, ''), 0);
+  exec(cmd, opt, cbName) {
+    /* KernelSU takes the callback *name*, not a function. */
+    state.cmds.push(cmd);
+    const slow = state.slowCurl && /--resolve/.test(cmd) ? 150 : 0;
+    realSetTimeout(() => global.window[cbName](0, answer(cmd), ''), slow);
   }
 };
 
-/* Keep the poller's 800 ms tick from slowing the suite down. The bridge stub
-   already answers on a 0 ms timer, so ordering is preserved. */
+/* Keep the console's 60 ms flush and the poller's 800 ms tick from slowing the
+   suite down. The bridge stub already answers on a 0 ms timer. */
 const realSetTimeout = global.setTimeout;
-global.setTimeout = (fn) => realSetTimeout(fn, 0);
+/* Speed up the poll/flush timers, but leave the 120 s exec timeout at its real
+   scale: speeding that one up makes every command reject before its callback
+   runs. */
+global.setTimeout = (fn, ms) => realSetTimeout(fn, ms < 5000 ? 0 : ms);
 
 let failures = 0;
 function eq(label, got, want) {
@@ -117,132 +231,195 @@ eval(diagSrc + '\n' + js);
 const g = id => els[id] || (els[id] = el(id));
 
 (async () => {
-  await until(() => /就绪|未取得/.test(g('status-text').textContent));
+  await until(() => /就绪|未取得|未检测/.test(g('status-text').textContent));
 
   console.log('== startup ==');
   ok('status bar visible after init', !g('status').hidden);
   eq('init reports ready', g('status-text').textContent, '就绪 · /m');
   eq('editor is the saved file', g('h-manual').value, '1.1.1.1\tmtalk.google.com\n');
-  ok('one collection, not one per source',
-     seen.filter(c => /collect\.sh/.test(c)).length === 1,
-     seen.filter(c => /collect\.sh/.test(c)).length + ' collect calls');
+  eq('entries come from the merged file', g('h-entries').textContent, '0 条');
+  eq('unmounted stock hosts is reported', g('h-mount').textContent, '未挂载');
+  ok('scan was read directly', state.cmds.some(c => /cmd wifi list-scan-results/.test(c)),
+     state.cmds.slice(0, 8).join(' | '));
 
-  console.log('== status bar sits outside the tab sections ==');
-  g('tab-hs').onclick();
-  ok('bar visible after switching tabs', !g('status').hidden);
-  const pageStart = html.indexOf('id="p-hs"');
-  const barPos = html.indexOf('id="status"');
-  ok('status bar sits outside the tab sections', barPos < pageStart,
-     `bar at ${barPos}, first tab at ${pageStart}`);
+  console.log('== gateway, mask and routes ==');
+  eq('local address carries its prefix', g('n-addr').textContent, '192.168.1.13/24');
+  eq('gateway is printed', g('n-gw').textContent, '192.168.1.1');
+  eq('mask is derived from the prefix', g('n-mask').textContent, '255.255.255.0');
+  ok('route rows are rendered', /default/.test(g('n-routes').innerHTML) &&
+     /192\.168\.1\.1/.test(g('n-routes').innerHTML), g('n-routes').innerHTML);
+  const routeHtml = g('n-routes').innerHTML;
+  ok('the default route sorts first',
+     routeHtml.indexOf('default') < routeHtml.indexOf('192.168.1.0/24'), routeHtml);
 
-  console.log('== detection appends, never writes ==');
-  probeOut = '140.82.113.4\tgithub.com\n142.250.72.14\tmtalk.google.com\n';
-  logOut = '[12:00:01] start domains=2 timeout=3s threads=8\n' +
-           '[12:00:02] resolve github.com -> 1 ip\n' +
-           '[12:00:05] ok   github.com 140.82.113.4 0.032s tls=1\n' +
-           '[12:00:06] done hosts=2 candidates=3 seconds=5\n';
-  const beforeProbe = seen.length;
-  await g('h-probe').onclick();
+  console.log('== outbound identity ==');
+  eq('egress ip from the echo page', g('n-cip').textContent, '39.96.19.125');
+  eq('resolver ip from the echo page', g('n-dip').textContent, '39.103.26.229');
+  eq('dns verdict from the echo page', g('n-dns').textContent, '正确');
+  ok('the gbk page was decoded', !/\ufffd/.test(g('n-cip').textContent), g('n-cip').textContent);
 
-  ok('probe result appended', g('h-manual').value.includes('140.82.113.4\tgithub.com'),
-     g('h-manual').value);
-  ok('existing entry kept', g('h-manual').value.includes('1.1.1.1\tmtalk.google.com'),
-     g('h-manual').value);
-  ok('existing entry not duplicated', g('h-manual').value.split('mtalk.google.com').length === 2,
-     g('h-manual').value);
-  ok('log pane is visible', !g('h-log').hidden);
-  ok('log shows progress', /ok\s+github\.com/.test(g('h-log').textContent),
-     g('h-log').textContent);
-  ok('status names what was added', /1 条已追加到编辑框/.test(g('status-text').textContent),
-     g('status-text').textContent);
-  ok('status mentions the skipped entry', /1 条已存在未覆盖/.test(g('status-text').textContent),
-     g('status-text').textContent);
-  ok('detection did not touch hosts',
-     !applied.some(c => /manager\.sh apply/.test(c)), applied.join(' | '));
-  ok('detection does not re-read the scan',
-     !seen.slice(beforeProbe).some(c => /collect\.sh/.test(c)),
-     seen.slice(beforeProbe).filter(c => /collect\.sh/.test(c)).join(' | '));
+  console.log('== hosts: read-only mirror and editor ==');
+  g('h-editbox').hidden = true;        /* the attribute in the HTML */
+  g('h-edit').textContent = '编辑';
+  await loadStatus();
+  ok('the effective file is shown read-only', /# android stock hosts/.test(g('h-view').textContent),
+     g('h-view').textContent);
+  eq('the editor starts collapsed', g('h-editbox').hidden, true);
+  g('h-edit').onclick();
+  eq('the editor opens on demand', g('h-editbox').hidden, false);
+  eq('the button becomes a collapse control', g('h-edit').textContent, '收起');
 
-  console.log('== detection with nothing reachable ==');
-  const keep = g('h-manual').value;
-  probeOut = '';
-  logOut = '[12:00:01] start domains=2 timeout=3s threads=8\n' +
-           '[12:00:02] resolve github.com -> none\n' +
-           '[12:00:02] done hosts=0 candidates=0\n';
-  await g('h-probe').onclick();
-  ok('failure is reported', /没有可用地址/.test(g('status-text').textContent),
-     g('status-text').textContent);
-  ok('failure is not green', /warn|bad/.test(g('status').className), g('status').className);
-  eq('editor unchanged on failure', g('h-manual').value, keep);
+  console.log('== dns burst ==');
+  /* The mock DOM does not parse the HTML, so the prefilled values are set here
+     exactly as the markup declares them. */
+  g('d-host').value = 'google.com';
+  g('d-server').value = '8.8.8.8';
+  g('d-count').value = '8';
+  await g('d-run').onclick();
+  const dcmd = state.cmds.filter(c => /nc -u/.test(c));
+  eq('one query per round', dcmd.length, 8);
+  ok('the server is the one typed', dcmd.every(c => /'8\.8\.8\.8' 53/.test(c)), dcmd[0]);
+  ok('each query is bounded', dcmd.every(c => /nc -u -w \d+/.test(c)), dcmd[0]);
+  /* Nothing lands on disk: the query packet is base64 on the command line and
+     decoded straight into nc's stdin. */
+  ok('the packet is piped, never written',
+     dcmd.every(c => /printf %s [A-Za-z0-9+/=]+ \| base64 -d \|/.test(c)), dcmd[0]);
+  ok('no temp file is ever created',
+     !state.writes.some(w => /kfs-dns|\/tmp\//.test(w.path)),
+     state.writes.map(w => w.path).join(','));
+  ok('no cleanup command is needed',
+     !state.cmds.some(c => /rm -f/.test(c)), state.cmds.filter(c => /rm -f/.test(c)).join('\n'));
+  eq('addresses are listed', g('d-hits').textContent, '2 个');
+  ok('the list shows a hit count', /\/ 8/.test(g('d-list').innerHTML), g('d-list').innerHTML);
 
-  console.log('== one button applies ==');
-  g('h-manual').value = '9.9.9.9\tgithub.com\n';
+  console.log('== console records the transport ==');
+  /* The pane flushes on a timer; force one flush so the assertion does not
+     depend on how the test runtime schedules zero-delay timers. */
+  conFlush();
+  const con = g('con').textContent;
+  ok('console shows the scan command', con.includes('$ cmd wifi list-scan-results'), con.slice(0, 300));
+  ok('console shows an exit code', /→ rc=0 · \d+ms/.test(con), con.slice(0, 300));
+  ok('console counts commands', /[1-9]\d* 命令 · 0 失败/.test(g('con-count').textContent),
+     g('con-count').textContent);
+
+  console.log('== no module script in the path ==');
+  const scripts = state.cmds.filter(c => /\.sh\b/.test(c));
+  eq('no .sh command was sent', scripts, []);
+  ok('no manager/collect/probe/diagnose/capacity file exists',
+     ['manager.sh', 'collect.sh', 'probe.sh', 'diagnose.sh', 'capacity.sh', 'action.sh']
+       .every(f => !fs.existsSync(path.join(ROOT, 'module', f))),
+     'a deleted script is still on disk');
+
+  console.log('== detection and capability are gone ==');
+  const pageSrc = fs.readFileSync(path.join(ROOT, 'module/webroot/index.html'), 'utf8');
+  ok('no probe card', !/id="h-probe"/.test(pageSrc) && !/id="h-log"/.test(pageSrc));
+  ok('no capability card', !/id="btn-cap"/.test(pageSrc) && !/id="cap-survey"/.test(pageSrc));
+  /* The only outbound request left is the echo page: it replaces `ping
+     github.com` and reports both the egress IP and the resolver it saw. */
+  const curls = state.cmds.filter(c => /curl/.test(c));
+  ok('one outbound GET, to the echo page',
+     curls.length === 1 && /only-[a-z0-9]{32}\.nstool\.laiqukankan\.com/.test(curls[0]),
+     curls.join('\n'));
+  ok('the host carries a 32-character code',
+     /only-[a-z0-9]{32}\.nstool\.laiqukankan\.com/.test(curls[0]), curls[0]);
+  ok('the echo request is bounded', /-m \d+/.test(curls[0]), curls[0]);
+  ok('the editor is still there', /id="h-manual"/.test(pageSrc));
+  ok('the save button is still there', /id="h-save"/.test(pageSrc));
+
+  console.log('== one button writes and mounts ==');
+  g('h-manual').value = '9.9.9.9\tgithub.com\n9.9.9.9\tgithub.com\n';
   await g('h-save').onclick();
-  const cmd = applied[applied.length - 1] || '';
-  const enc = (cmd.match(/printf %s (\S+) \|/) || [])[1] || '';
-  eq('editor is what gets written', Buffer.from(enc, 'base64').toString('utf8'),
-     '9.9.9.9\tgithub.com\n');
-  ok('apply runs after the write', /manager\.sh apply/.test(cmd), cmd);
-  ok('save reports success', /已保存 1 条/.test(g('status-text').textContent),
+  const uh = state.writes.filter(w => w.path === '/m/user-hosts').pop();
+  const hs = state.writes.filter(w => w.path === '/m/hosts').pop();
+  const sy = state.writes.filter(w => w.path === '/m/system/etc/hosts').pop();
+  eq('editor is written verbatim', uh.body, '9.9.9.9\tgithub.com\n9.9.9.9\tgithub.com\n');
+  ok('merged file has the entry once',
+     (hs.body.match(/9\.9\.9\.9\tgithub\.com/g) || []).length === 1, hs.body);
+  ok('both copies are the same file', sy.body === hs.body, sy.body);
+  ok('the merged file still starts with the header', hs.body.startsWith('# Generated '), hs.body);
+  ok('mount ran', state.cmds.some(c => /mount -o bind/.test(c)), 'no mount command');
+  eq('one entry in effect', g('h-entries').textContent, '1 条');
+  eq('mount state read back', g('h-mount').textContent, '已挂载');
+  ok('save reports success', /已保存 2 条并重新挂载/.test(g('status-text').textContent),
      g('status-text').textContent);
 
-  console.log('== rescan tells the truth ==');
-  await g('btn-scan').onclick();
-  ok('stale rescan is reported as stale', /没有回来新结果/.test(g('status-text').textContent),
+  console.log('== country code is written and applied ==');
+  g('c-input').value = 'jp';
+  await g('c-set').onclick();
+  ok('config keeps the key', /^CC=JP$/m.test(state.config), state.config);
+  ok('system.prop has all four keys',
+     ['ro.boot.wificountrycode=JP', 'ro.product.wifi.country=JP',
+      'persist.sys.wifi.countrycode=JP', 'ro.wifi.country_code=JP']
+       .every(l => state.systemProp.includes(l)), state.systemProp);
+  ok('resetprop was called', state.cmds.some(c => /resetprop -n ro\.boot\.wificountrycode JP/.test(c)),
+     'no resetprop');
+  ok('runtime API was called', state.cmds.some(c => /cmd wifi force-country-code enabled JP/.test(c)),
+     'no force-country-code');
+  ok('cache is updated', g('c-want').textContent === 'JP', g('c-want').textContent);
+  ok('success is reported', /国家码已设为 JP/.test(g('status-text').textContent),
      g('status-text').textContent);
 
-  scanOut = () => 'BSSID  Frequency  RSSI  Age(sec)  SSID  Flags\n' +
-    '  aa:bb:**:**:ee:01  5180  -51(0:-51/1:-56)  0.4  Home  [RSN-PSK][ESS]\n';
-  await g('btn-scan').onclick();
-  ok('fresh rescan is reported as done', /扫描完成：最新条目 0\.4 秒/.test(g('status-text').textContent),
-     g('status-text').textContent);
+  console.log('== there is no scan trigger any more ==');
+  ok('no scan command is ever issued',
+     !state.cmds.some(c => /start-scan|wifi_scan_throttle|iw dev .* scan|svc wifi/.test(c)),
+     state.cmds.filter(c => /scan|svc wifi/.test(c)).join('\n'));
+
+  console.log('== AP list lives on the overview ==');
+  const src = fs.readFileSync(path.join(ROOT, 'module/webroot/index.html'), 'utf8');
+  ok('the 信道 tab is gone', !/id="tab-ap"/.test(src) && !/id="p-ap"/.test(src));
+  ok('the strongest-AP card is gone', !/id="o-best"/.test(src));
+  ok('the AP list is on the overview page',
+     src.indexOf('id="ap-groups"') < src.indexOf('id="p-hs"'));
+
+  /* Default order is signal: the group with the loudest radio first, and the
+     rows inside a group the same way. */
+  state.scan = HDR +
+    '  11:11:11:11:11:11  2412  -80(0:-80/1:-80)  3.0  Low   [RSN-PSK][ESS]\n' +
+    '  22:22:22:22:22:22  5180  -40(0:-40/1:-40)  3.0  High  [RSN-PSK][ESS]\n' +
+    '  33:33:33:33:33:33  5745  -60(0:-60/1:-60)  3.0  Mid   [RSN-PSK][ESS]\n';
+  await refreshAll();
+  const order = g('ap-groups').innerHTML;
+  ok('the strongest network is listed first',
+     order.indexOf('High') >= 0 && order.indexOf('High') < order.indexOf('Mid') &&
+     order.indexOf('Mid') < order.indexOf('Low'),
+     order.slice(0, 300));
 
   console.log('== multibyte ssid survives the bridge ==');
-  ok('scan is read through base64',
-     seen.some(c => /collect\.sh/.test(c) && /base64/.test(c)),
-     seen.filter(c => /collect\.sh/.test(c)).join(' | '));
-
-  scanOut = () => 'BSSID  Frequency  RSSI  Age(sec)  SSID  Flags\n' +
+  state.scan = HDR +
     '  68:19:**:**:37:c3  5785  -58(0:-59/1:-63)  10.1  华科  [RSN-PSK][ESS]\n' +
     '  68:19:**:**:37:c2  5785  -58(0:-59/1:-63)  10.1  咖啡馆 5G  [RSN-PSK][ESS]\n';
-  await g('btn-scan').onclick();
+  await refreshAll();
   const apHtml = g('ap-groups').innerHTML;
   ok('chinese ssid renders intact', apHtml.includes('华科'), apHtml.slice(0, 200));
   ok('chinese ssid with space intact', apHtml.includes('咖啡馆 5G'), apHtml.slice(0, 200));
   ok('no replacement glyphs', !/\ufffd/.test(apHtml), apHtml.slice(0, 200));
+  ok('the redacted address is shown as delivered', apHtml.includes('68:19:**:**:37:c3'),
+     apHtml.slice(0, 200));
 
-  console.log('== hardware capability ==');
-  capState.json = 'soc=SM8650\nhardware=qcom\ndriver=qcacld\n' +
-    'survey=no\nnoise=none\nmonitor=no\ninjection=no\nexternal_adapter=no\n';
-  await g('btn-cap').onclick();
-  eq('survey shown as unsupported', g('cap-survey').textContent, '不支持');
-  eq('monitor shown as unsupported', g('cap-mon').textContent, '不支持');
-  eq('injection shown as unsupported', g('cap-inj').textContent, '不支持');
-  ok('driver line names the soc', g('cap-drv').textContent.includes('qcacld'),
-     g('cap-drv').textContent);
-  ok('nothing supported is reported honestly',
-     /无法给出噪声\/频谱/.test(g('status-text').textContent), g('status-text').textContent);
+  /* No supplicant path is left: `wpa_cli` burns ten seconds per call on the AIDL
+     supplicant and never answers, so the page does not ask at all. */
+  ok('nothing consults wpa_cli', !state.cmds.some(c => /wpa_cli/.test(c)),
+     state.cmds.filter(c => /wpa_cli/.test(c)).join('\n'));
 
-  capState.json = 'soc=SM8650\ndriver=qcacld\nsurvey=yes\nsurvey_channels=38\n' +
-    'monitor=no\ninjection=no\nexternal_adapter=no\n';
-  await g('btn-cap').onclick();
-  eq('survey carries the channel count', g('cap-survey').textContent, '支持（38 个信道）');
-  eq('survey is green when supported', g('cap-survey').className, 'v ok');
-
-  capState.json = 'soc=SM8650\ndriver=bcmdhd\nsurvey=unknown\nmonitor=yes\n' +
-    'monitor_creatable=no\ninjection=no\nexternal_adapter=yes\n';
-  await g('btn-cap').onclick();
-  eq('claimed but unusable monitor is called out',
-     g('cap-mon').textContent, '声明支持，但建不出接口');
-  eq('claimed monitor is red', g('cap-mon').className, 'v bad');
-  eq('external adapter detected', g('cap-ext').textContent, '已连接');
-  eq('survey unknown is not a yes', g('cap-survey').textContent, '未确认');
+  console.log('== four-layer diagnosis ==');
+  await g('c-diag').onclick();
+  ok('diagnosis names the framework cc', /framework_cc=US/.test(g('out').textContent),
+     g('out').textContent.slice(0, 300));
+  ok('diagnosis counts the bands', /bss_unii2c=/.test(g('out').textContent),
+     g('out').textContent.slice(0, 300));
+  ok('diagnosis reports success', /诊断完成/.test(g('status-text').textContent),
+     g('status-text').textContent);
 
   console.log('== failure is visible, not silent ==');
   g('c-input').value = 'X';
   await g('c-set').onclick();
   ok('invalid code is reported', /两位国家码/.test(g('status-text').textContent),
      g('status-text').textContent);
+
+  console.log('== console stays bounded ==');
+  ok('console still counts commands', /^\d+ 命令 · 0 失败$/.test(g('con-count').textContent),
+     g('con-count').textContent);
+  ok('console is non-empty', g('con').textContent.length > 200, 'console empty');
 
   console.log(failures ? `\n${failures} failure(s)` : '\nall status-bar tests passed');
   process.exit(failures ? 1 : 0);

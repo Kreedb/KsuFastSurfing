@@ -19,8 +19,7 @@ mkdir -p "$DIST"
 # index.html references diag.js for development, and the packaged copy inlines
 # it: the WebView loads the page from an internal path where <script src>
 # resolution has been unreliable. The substitution happens on a staged copy, so
-# the build never rewrites a tracked file (the old version inlined in place,
-# which is why the repository carried a second, 445-line copy of diag.js).
+# the build never rewrites a tracked file.
 STAGE=$(mktemp -d 2>/dev/null || echo "$DIST/.stage.$$")
 trap 'rm -rf "$STAGE"' EXIT
 cp -a "$MOD/." "$STAGE/"
@@ -46,9 +45,10 @@ src, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 
 # Executables must keep 0755; data files must be 0644.
 EXEC = {
-    "post-fs-data.sh", "action.sh",
-    "uninstall.sh", "customize.sh", "manager.sh", "diagnose.sh", "probe.sh",
-    "capacity.sh", "collect.sh",
+    # Only the three module lifecycle hooks are shell. Everything that measures
+    # or changes state runs from the page, so there is no manager/collect/probe
+    # script to package.
+    "post-fs-data.sh", "uninstall.sh", "customize.sh",
 }
 # Runtime artifacts never ship, and neither does the page's source copy: the
 # packaged index.html already contains it.
