@@ -66,10 +66,14 @@ import pathlib, sys
 web = pathlib.Path(sys.argv[1]) / "webroot"
 idx, src = web / "index.html", web / "diag.js"
 tag = '<script src="diag.js"></script>'
-text = idx.read_text()
+# Explicit UTF-8: the page and the data layer are UTF-8, and a build that
+# depends on the host's locale would silently produce mojibake on a machine
+# whose LANG is C or a legacy codepage.
+text = idx.read_text(encoding="utf-8")
 if tag not in text:
     sys.exit("error: index.html is missing the diag.js script tag")
-idx.write_text(text.replace(tag, "<script>\n" + src.read_text() + "\n</script>", 1))
+idx.write_text(text.replace(tag, "<script>\n" + src.read_text(encoding="utf-8") + "\n</script>", 1),
+               encoding="utf-8")
 PY
 
 grep -q '<script src=' "$STAGE/webroot/index.html" &&
@@ -107,7 +111,7 @@ IN_ZIP=$(python3 - "$OUT" << 'PY'
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as z:
     names = z.namelist()
-    page = z.read("webroot/index.html").decode()
+    page = z.read("webroot/index.html").decode("utf-8")
     bad = []
     if "webroot/diag.js" in names:
         bad.append("diag.js is packaged twice")

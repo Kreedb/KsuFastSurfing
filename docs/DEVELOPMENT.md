@@ -155,6 +155,22 @@ node tests/test-diag.js        # 也可以单独跑某一份
 CI 里不再有第二份检查清单——以前两边各写一遍，改一边忘另一边就会漏。
 `dash -n` 取代 `busybox-static` 的 apt 安装，省掉每次跑 CI 的 20 秒。
 
+runner 固定为 `ubuntu-24.04`，不用 `ubuntu-latest`：这个浮动标签从 2026-10-19 起
+开始迁往 Ubuntu 26，用户的构建会悄悄换掉自己脚下的发行版。要升级就改这一行。
+
+action 版本跟着 runner 的 Node 运行时走（当前 runner 强制 Node 24）：
+
+| 用途 | 版本 | 运行时 |
+|---|---|---|
+| `actions/checkout` | v5 | node24 |
+| `actions/setup-node` | v5（`node-version: 22`） | node24 |
+| `actions/upload-artifact` | v7 | node24 |
+| `softprops/action-gh-release` | v3 | node24 |
+
+`build.sh` 只依赖 `dash`、`node`、`python3` 与 coreutils，三者都在 runner 预装里，
+所以换发行版（含 Arch）不会改变构建结果：构建产物只取决于仓库内容，
+zip 里所有时间戳都被固定为 1980-01-01。
+
 只有推送 `v*` tag 时才会创建 Release。日常 push main 只跑构建与测试。
 
 ## 发布纪律
