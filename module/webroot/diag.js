@@ -215,12 +215,17 @@ function routeText(base, get) {
          (dev ? ' dev ' + dev : '') + '\n';
 }
 
-/* Pure: takes the already-collected route/ping/dns blocks, so a failed ping
-   cannot blank the gateway and a missing gateway cannot look like 0% loss. */
-function parseNet(route, pingTxt, addrTxt, echo) {
+/* Pure: takes the already-collected route/addr/echo blocks. There is no local
+   ping any more: packet loss and gateway RTT only ever described the first hop,
+   and a hop that answers ICMP says nothing about whether the internet is
+   reachable. Latency is now measured by the same request that reports the
+   egress address, so one number replaces two and costs no extra round trip. */
+function parseNet(route, addrTxt, echo) {
   const net = {
-    gateway: '', loss: null, rtt: null, dns: 'unknown',
-    addr: '', prefix: null, mask: '', iface: '', routes: [], clientIp: '', dnsIp: ''
+    gateway: '', dns: 'unknown',
+    addr: '', prefix: null, mask: '', iface: '', routes: [],
+    clientIp: '', clientArea: '', dnsIp: '', dnsArea: '',
+    latency: null, lookupMs: null
   };
 
   net.gateway = gatewayOf(route);
@@ -231,17 +236,17 @@ function parseNet(route, pingTxt, addrTxt, echo) {
   net.addr = a.addr; net.prefix = a.prefix; net.mask = a.mask;
   if (!net.iface) net.iface = a.iface;
 
-  const pl = (pingTxt || '').match(/(\d+)% packet loss/);
-  if (pl) net.loss = +pl[1];
-  const rt = (pingTxt || '').match(/rtt [^=]*= ([\d.]+)\/([\d.]+)/);
-  if (rt) net.rtt = +rt[2];                         /* avg, not max */
-
   /* The echo page replaces the old `ping github.com` probe: one HTTPS request
-     answers reachability, and reports the address the internet sees plus the
-     resolver it observed. A failure is 'fail', an unparsable page 'unknown'. */
+     answers reachability, reports the address the internet sees plus the
+     resolver it observed, and its own timing is the outbound latency. A
+     failure is 'fail', an unparsable page 'unknown'. */
   const e = echo || {};
   net.clientIp = e.client || '';
+  net.clientArea = e.clientArea || '';
   net.dnsIp = e.dns || '';
+  net.dnsArea = e.dnsArea || '';
+  net.latency = (e.total != null && isFinite(e.total)) ? e.total : null;
+  net.lookupMs = (e.lookup != null && isFinite(e.lookup)) ? e.lookup : null;
   net.dns = e.verdict === 'ok' ? 'ok' : (e.verdict === 'bad' ? 'bad'
           : (e.verdict === 'fail' ? 'fail' : 'unknown'));
   return net;
@@ -372,9 +377,11 @@ function analyse(rows, link, net) {
     /* The link/L3 numbers are carried at the top level because the renderer
        reads them as scalars. Dropping them here made the network card silently
        show "未获取" even when the gateway ping had succeeded. */
-    gateway: net.gateway, loss: net.loss, rtt: net.rtt,
+    gateway: net.gateway,
     addr: net.addr, prefix: net.prefix, mask: net.mask, iface: net.iface,
-    routes: net.routes, clientIp: net.clientIp, dnsIp: net.dnsIp,
+    routes: net.routes, clientIp: net.clientIp, clientArea: net.clientArea,
+    dnsIp: net.dnsIp, dnsArea: net.dnsArea,
+    latency: net.latency, lookupMs: net.lookupMs,
     summary: {
       total: n,
       n24: count(a => a.band === '2.4'), n5,
@@ -443,19 +450,6 @@ function countHosts(mergedText) {
   }).length;
 }
 
-/* Replace one key in config-style text, keeping every other line. */
-function setKV(text, key, value) {
-  const lines = String(text || '').split(/\r?\n/);
-  let hit = false;
-  const out = lines.map(l => {
-    if (l.startsWith(key + '=')) { hit = true; return key + '=' + value; }
-    return l;
-  });
-  while (out.length && out[out.length - 1] === '') out.pop();
-  if (!hit) out.push(key + '=' + value);
-  return out.join('\n') + '\n';
-}
-
 /* ---------- country code ----------
    OEMs word this differently ("Country code is: US", "Wifi Country Code: US",
    "COUNTRY CODE IS: US"). Trust the first two-letter token that follows a
@@ -492,8 +486,8 @@ async function collectScanText() {
 }
 
 /* One pass over the device. The three sources are independent and run in
-   parallel: a failed ping must not blank the gateway, and an unreachable DNS
-   must not hold back the scan table. */
+   parallel: a failed address lookup must not blank the gateway, and an
+   unreachable echo page must not hold back the scan table. */
 async function measure() {
   const scanTxt = await collectScanText();
   const rows = parseScan(scanTxt);
@@ -504,17 +498,17 @@ async function measure() {
   if (!gatewayOf(routeTxt)) {
     routeTxt = routeText(routeTxt, await shRaw('ip route get 1.1.1.1 2>/dev/null'));
   }
-  const gw = gatewayOf(routeTxt);
   const ifc = ifaceOf(routeTxt) || 'wlan0';
 
-  const ifc2 = ifaceOf(routeTxt);
-  const [pingTxt, addrTxt, echo] = await Promise.all([
-    gw ? shRaw('ping -c 3 -i 0.2 -W 1 ' + SHQ(gw)) : Promise.resolve(''),
-    ifc2 ? shRaw('ip addr show dev ' + SHQ(ifc2) + ' 2>/dev/null') : Promise.resolve(''),
-    echoLookup(6)
+  /* The echo page is the only outbound measurement left, so it runs alongside
+     the local reads rather than after them. */
+  const [addrTxt, echo] = await Promise.all([
+    shRaw('ip addr show dev ' + SHQ(ifc) + ' 2>/dev/null'),
+    echoLookup(8)
   ]);
 
-  const d = analyse(rows, parseLink(linkTxt), parseNet(routeTxt, pingTxt, addrTxt, echo));
+  const d = analyse(rows, parseLink(linkTxt),
+                    parseNet(routeTxt, addrTxt, echo));
   d.iface = ifc;          /* capacity probing needs the interface that has the route */
   return d;
 }
@@ -560,36 +554,113 @@ function echoUrl() {
   return 'https://' + sessionCode + '.' + ECHO_HOST + '/';
 }
 
-/* The page has no API - it is HTML for humans. Pull the two addresses out by
-   shape rather than by label, because the labels are Chinese and differ
-   between deployments ("您的IP地址信息"/"IP"). */
+/* The page has no API - it is HTML for humans. Each line is
+     <label>: <ip> <area text>
+   and the area text is the whole point of the page: "广东省深圳市电信" says more
+   about a broken resolver than the bare address does. Lines are split first so
+   the tail of the IP line cannot be read as part of the DNS line.
+
+   The labels are Chinese and differ between deployments ("您的IP地址信息"/"IP"),
+   so matching is by shape after splitting, not by exact wording. */
+const AREA_MAX = 64;            /* long enough for "广东省深圳市电信", short enough to be sane */
+
+function tidyArea(s) {
+  return String(s || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[\s\u00a0]+/g, ' ')
+    .trim()
+    .slice(0, AREA_MAX);
+}
+
 function parseEcho(html) {
   const text = String(html || '');
-  const ipOf = (re) => {
-    const m = text.match(re);
-    if (!m) return '';
-    const ip = m[1];
-    return isIPv4(ip) ? ip : '';
+  const segs = text.split(/<br\s*\/?>|\n/i);
+
+  /* "label: 1.2.3.4 area" -> { ip, area }. The address is matched first and
+     everything after it on the same line is the area; anything that is not an
+     address is not accepted, so a page full of unrelated numbers cannot
+     produce a bogus client IP. */
+  const pick = (labels) => {
+    for (const seg of segs) {
+      if (!labels.some(l => seg.indexOf(l) >= 0 || new RegExp(l, 'i').test(seg))) continue;
+      const m = seg.match(/([0-9]{1,3}(?:\.[0-9]{1,3}){3})\s*([^<>]*)/);
+      if (m && isIPv4(m[1])) return { ip: m[1], area: tidyArea(m[2]) };
+    }
+    return { ip: '', area: '' };
   };
-  const client = ipOf(/(?:IP地址信息|IP\s*address)[:：]?\s*([0-9.]+)/i) ||
-                 ipOf(/([0-9]{1,3}(?:\.[0-9]{1,3}){3})/);
-  const dns = ipOf(/DNS地址信息[:：]?\s*([0-9.]+)/i) ||
-              ipOf(/DNS\s*(?:server|address)[:：]?\s*([0-9.]+)/i);
-  const verdict = /DNS设置正确|DNS\s*(?:is\s*)?correct/i.test(text) ? 'ok'
-                : (/DNS设置错误|DNS\s*(?:is\s*)?(?:wrong|incorrect)/i.test(text) ? 'bad' : 'unknown');
-  return { client, dns, verdict };
+
+  let client = pick(['IP地址', 'IP address']);
+  let dns = pick(['DNS地址', 'DNS address', 'DNS server']);
+
+  /* Older deployments drop the labels and print only the addresses. Fall back
+     to document order - first address is ours, second is the resolver - and
+     leave the area blank rather than attaching the wrong city to the IP. */
+  if (!client.ip) {
+    const all = (text.match(/[0-9]{1,3}(?:\.[0-9]{1,3}){3}/g) || [])
+      .filter(isIPv4);
+    if (all.length) {
+      client = { ip: all[0], area: '' };
+      if (!dns.ip && all.length > 1) dns = { ip: all[1], area: '' };
+    }
+  }
+  if (!dns.ip) {
+    const all = (text.match(/[0-9]{1,3}(?:\.[0-9]{1,3}){3}/g) || []).filter(isIPv4)
+      .filter(x => x !== client.ip);
+    if (all.length) dns = { ip: all[0], area: '' };
+  }
+
+  /* "DNS设置正确" / "DNS设置可能存在问题，请联系您的ISP服务商". The second one is the
+     finding this whole card exists for, so it must not fall through to
+     'unknown'. */
+  const verdict = /DNS设置(?:正确|无误)|DNS\s*(?:is\s*)?correct/i.test(text) ? 'ok'
+    : (/DNS设置(?:可能)?(?:存在)?(?:问题|错误|有误)|DNS\s*(?:is\s*)?(?:wrong|incorrect|mismatch)/i.test(text)
+       ? 'bad' : 'unknown');
+
+  return { client: client.ip, clientArea: client.area,
+           dns: dns.ip, dnsArea: dns.area, verdict };
 }
 
 /* curl -sS with a short cap: the whole point is a bounded outbound test, and a
    hanging TLS handshake must not hold the page. `--compressed` because the
-   server may gzip; `-o -` so nothing touches disk. */
+   server may gzip. `-o /dev/null` keeps the body off stdout so the only thing
+   printed is the timing line - the body is fetched separately below.
+
+   The request returns the body and the timings in one shot: `total` is the
+   end-to-end cost of a real round trip (DNS + TCP + TLS + first byte), which
+   is what a user feels, and `time_namelookup` separates a slow resolver from
+   a slow path. This replaced the gateway ping, which measured the first hop
+   only and could not tell "gateway is fine, ISP is broken" from anything. */
 async function echoLookup(timeout) {
   const t = Math.max(2, Math.min(15, timeout || 6));
   const url = echoUrl();
-  const txt = await shRawAs('curl -sS --compressed -m ' + t + ' ' + SHQ(url), 'gbk');
-  if (!txt) return { client: '', dns: '', verdict: 'fail', raw: '' };
-  const r = parseEcho(txt);
-  r.raw = txt;
+  const mark = '\n@@T ';
+  const txt = await shRawAs(
+    'curl -sS --compressed -m ' + t +
+    ' -w ' + SHQ(mark + '%{time_total} %{time_namelookup} %{http_code}' + '\n') +
+    ' ' + SHQ(url), 'gbk');
+  if (!txt) return { client: '', dns: '', verdict: 'fail', latency: null, lookupMs: null, raw: '' };
+
+  /* Split the timing trailer off before parsing: its numbers would otherwise
+     be candidates for "some address on the page". */
+  let body = txt, total = null, lookup = null, code = 0;
+  const at = txt.indexOf(mark);
+  if (at >= 0) {
+    body = txt.slice(0, at);
+    const m = txt.slice(at + mark.length).trim().split(/\s+/);
+    if (m[0] != null && isFinite(+m[0])) total = Math.round(+m[0] * 1000);
+    if (m[1] != null && isFinite(+m[1])) lookup = Math.round(+m[1] * 1000);
+    if (m[2] != null) code = +m[2] || 0;
+  }
+
+  const r = parseEcho(body);
+  r.raw = body;
+  r.total = total;
+  r.lookup = lookup;
+  r.code = code;
+  /* curl exits 0 on a 404 that got a page; a page without addresses is still
+     not an answer to "where does the internet see me". */
+  if (!r.client && code && code >= 400) r.verdict = 'fail';
   return r;
 }
 

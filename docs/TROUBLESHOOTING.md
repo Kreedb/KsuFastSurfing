@@ -50,7 +50,7 @@ su -c 'cmd wifi get-country-code'
 
 ```sh
 su -c 'cat /data/adb/modules/KsuFastSurfing/mount.log'
-su -c 'cat /data/adb/modules/KsuFastSurfing/config'
+su -c 'cmd wifi get-country-code'
 su -c 'cmd wifi status'
 su -c 'cmd wifi list-scan-results | head -30'
 su -c 'mount | grep hosts'

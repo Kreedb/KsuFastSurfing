@@ -238,12 +238,13 @@
     <div class="row"><span class="k">本机地址</span><span class="v" id="n-addr">—</span></div>
     <div class="row"><span class="k">网关</span><span class="v" id="n-gw">—</span></div>
     <div class="row"><span class="k">子网掩码</span><span class="v" id="n-mask">—</span></div>
-    <div class="row"><span class="k">丢包</span><span class="v" id="n-loss">—</span></div>
-    <div class="row"><span class="k">网关 RTT</span><span class="v" id="n-rtt">—</span></div>
+    <div class="row"><span class="k">外网延迟</span><span class="v" id="n-lat">—</span></div>
     <div class="row"><span class="k">出口 IP</span><span class="v" id="n-cip">—</span></div>
     <div class="row"><span class="k">出口 DNS</span><span class="v" id="n-dip">—</span></div>
     <div class="row"><span class="k">DNS 判定</span><span class="v" id="n-dns">—</span></div>
     <div class="row"><span class="k">同 SSID 多 BSSID</span><span class="v" id="n-roam">—</span></div>
+    <div class="muted">外网延迟是访问回显页的一次完整往返（DNS + TCP + TLS），括号内为其中
+      域名解析耗时。出口 IP / DNS 的归属地由回显页给出。</div>
   </div>
 
   <div class="card">
@@ -297,14 +298,15 @@
 
   <div class="card">
     <h2>国家码</h2>
-    <div class="row"><span class="k">配置</span><span class="v" id="c-want">—</span></div>
     <div class="row"><span class="k">当前 (框架)</span><span class="v" id="c-cur">—</span></div>
     <input type="text" id="c-input" placeholder="US" maxlength="2" autocapitalize="characters" style="margin-top:10px">
     <div class="grid2">
       <button class="act" id="c-set">应用</button>
       <button class="act alt" id="c-auto">恢复自动</button>
     </div>
-    <div class="muted">写入 config / system.prop 并注入属性，再调框架与 iw。能否看到 DFS 信道取决于射频与固件，以扫描结果为准。</div>
+    <div class="muted">只调用 <code>cmd wifi force-country-code</code>，由框架运行时生效，
+      不写属性也不改配置文件。重启后回到系统判断，需要时重新点一次。
+      能否看到 DFS 信道取决于射频与固件，以扫描结果为准。</div>
   </div>
 </section>
 
@@ -526,21 +528,21 @@ TABS.forEach(([b,p]) => {
 
 function setV(el, text, cls) { el.textContent = text; el.className = 'v' + (cls ? ' ' + cls : ''); }
 
+/* "202.105.122.210 广东省深圳市电信". The address and the area answer two
+   different questions ("which address does the internet see" vs "where does it
+   think that address is"), so they belong on one line only when both exist. */
+function joinArea(ip, area) {
+  const a = String(ip || '').trim(), b = String(area || '').trim();
+  if (!a) return '';
+  return b ? (a + ' · ' + b) : a;
+}
+
 /* SSIDs are chosen by whoever runs the neighbouring AP, so they are untrusted
    input. They must never reach innerHTML raw: an SSID literally named
    <img src=x onerror=...> would execute in the WebUI's WebView. */
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
-function parseKV(txt) {
-  const m = {};
-  (txt || '').split('\n').forEach(l => {
-    const i = l.indexOf('=');
-    if (i > 0) m[l.slice(0, i).trim()] = l.slice(i + 1).trim();
-  });
-  return m;
-}
 
 /* ---------- data ---------- */
 async function loadDiag() {
@@ -609,12 +611,15 @@ function render(d) {
   setV($('n-addr'), d.addr ? (d.addr + '/' + d.prefix) : '未获取');
   setV($('n-gw'), d.gateway || '未获取');
   setV($('n-mask'), d.mask || '—');
-  setV($('n-loss'), d.loss == null ? '—' : (d.loss + '%'),
-       d.loss == null ? '' : (d.loss === 0 ? 'ok' : 'bad'));
-  setV($('n-rtt'), d.rtt == null ? '—' : (d.rtt + ' ms'),
-       d.rtt == null ? '' : (d.rtt <= 10 ? 'ok' : 'warn'));
-  setV($('n-cip'), d.clientIp || '未获取', d.clientIp ? 'ok' : 'bad');
-  setV($('n-dip'), d.dnsIp || '未获取', d.dnsIp ? '' : 'warn');
+  /* A full round trip over TLS is the number a user feels. The old gateway ping
+     measured the first hop, which is always fast and never the problem. The
+     resolver share is shown next to it because a 900 ms total that is 850 ms
+     DNS is a different fault from a slow path. */
+  setV($('n-lat'), d.latency == null ? '—'
+       : (d.latency + ' ms' + (d.lookupMs != null ? '（DNS ' + d.lookupMs + ' ms）' : '')),
+       d.latency == null ? '' : (d.latency <= 120 ? 'ok' : (d.latency <= 400 ? 'warn' : 'bad')));
+  setV($('n-cip'), joinArea(d.clientIp, d.clientArea) || '未获取', d.clientIp ? 'ok' : 'bad');
+  setV($('n-dip'), joinArea(d.dnsIp, d.dnsArea) || '未获取', d.dnsIp ? '' : 'warn');
   setV($('n-dns'), v.dns === 'ok' ? '正确' : (v.dns === 'bad' ? '不一致'
        : (v.dns === 'fail' ? '出网失败' : '未知')),
        v.dns === 'ok' ? 'ok' : (v.dns === 'bad' ? 'warn' : (v.dns === 'fail' ? 'bad' : '')));
@@ -666,10 +671,9 @@ function fmtLoad(v) {
 /* Status is assembled in the page from the same files and commands the old
    shell control plane used; there is no status subcommand left to call. */
 async function loadStatus() {
-  const [hs, sysHs, cfg, cur, mnt] = await Promise.all([
+  const [hs, sysHs, cur, mnt] = await Promise.all([
     readFile(MODDIR + '/hosts'),
     readFile('/system/etc/hosts'),
-    readFile(MODDIR + '/config'),
     countryCodeNow(),
     shRaw("mount 2>/dev/null | grep ' /system/etc/hosts '")
   ]);
@@ -690,11 +694,12 @@ async function loadStatus() {
   $('h-view').textContent = (sysHs || hs || '').trim() || '（空）';
   setV($('h-active'), countHosts(sysHs) + ' 条');
 
-  const kv = parseKV(cfg);
-  const want = (kv.CC || 'US').toUpperCase();
-  setV($('c-want'), want);
-  setV($('c-cur'), cur || '未获取', cur ? (cur === want ? 'ok' : 'warn') : 'bad');
-  $('c-input').value = want;
+  /* The forced code is runtime state, not a file: nothing is written to
+     config or system.prop, so what this row shows is what the framework
+     actually holds. Reading it back is the only way to know the call landed,
+     because `force-country-code` exits 0 even for a code it will ignore. */
+  setV($('c-cur'), cur || '未获取', cur ? 'ok' : 'bad');
+  if (!$('c-input').value) $('c-input').value = cur || '';
 
   return true;
 }
@@ -804,25 +809,15 @@ $('c-set').onclick = busy($('c-set'), async () => {
   const v = ($('c-input').value || '').trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(v)) { st('请输入两位国家码，例如 US', { ok: false }); return; }
 
-  st('正在写配置…', { running: true, pct: 10 });
-  const cfgTxt = await readFile(MODDIR + '/config');
-  const w1 = await writeFile(MODDIR + '/config', setKV(cfgTxt, 'CC', v));
-  if (!w1.ok) { st('写入 config 失败', { ok: false }); return; }
-  const w2 = await writeFile(MODDIR + '/system.prop',
-    'ro.boot.wificountrycode=' + v + '\nro.product.wifi.country=' + v + '\n' +
-    'persist.sys.wifi.countrycode=' + v + '\nro.wifi.country_code=' + v + '\n');
-  if (!w2.ok) { st('写入 system.prop 失败', { ok: false }); return; }
-
-  st('正在注入属性…', { running: true, pct: 30 });
-  await shRaw('command -v resetprop >/dev/null 2>&1 && { ' +
-              'resetprop -n ro.boot.wificountrycode ' + v + '; ' +
-              'resetprop -n ro.product.wifi.country ' + v + '; ' +
-              'resetprop -n persist.sys.wifi.countrycode ' + v + '; ' +
-              'resetprop -n ro.wifi.country_code ' + v + '; } ; echo rc=$?');
+  /* One command, one state. The old path wrote config + system.prop and pushed
+     four props through resetprop before touching the framework; three of those
+     steps only took effect after a reboot and none of them could be verified.
+     force-country-code is the API the framework itself exposes, it applies
+     immediately, and `get-country-code` reads back what it accepted. */
+  st('正在设置国家码…', { running: true, pct: 20 });
 
   /* Backoff, stop at the first success: a rejected code used to cost 10 s of
      fixed sleeps before the user saw the same failure. */
-  st('正在应用运行时国家码…', { running: true, pct: 55 });
   let ok = false, last = '';
   for (const d of [0, 300, 600, 1200]) {
     if (d) await delay(d);
@@ -831,18 +826,21 @@ $('c-set').onclick = busy($('c-set'), async () => {
   }
   if (!ok) klog('warn', 'cmd wifi force-country-code 未接受 ' + v + '：' + (last || '').trim());
 
-  /* iw is absent on retail images; this is a bonus layer, not a requirement. */
-  await shRaw('command -v iw >/dev/null 2>&1 && iw reg set ' + v + ' 2>&1; true');
-
+  /* Verified by read-back, not by the exit code: the framework silently keeps
+     the old code when the chip does not support the requested one. */
+  st('正在读回框架状态…', { running: true, pct: 70 });
+  const cur = await countryCodeNow();
   await loadStatus();
-  st(ok ? '国家码已设为 ' + v + '。能否看到 DFS 信道取决于射频与固件'
-        : '配置已写入 ' + v + '，但运行时接口未确认；重启后再看',
-     ok ? { ok: true } : { ok: false, warn: true });
+  const got = ok && (!cur || cur === v);
+  st(got ? '国家码已设为 ' + v + '。能否看到 DFS 信道取决于射频与固件'
+        : (ok ? '命令已接受，但框架读回 ' + (cur || '未获取') + '；该芯片可能不支持这个码'
+              : '框架未接受 ' + v + '，当前仍为 ' + (cur || '未获取')),
+     got ? { ok: true } : { ok: false, warn: true });
 });
 
 $('c-auto').onclick = busy($('c-auto'), async () => {
   st('交还国家码控制权给系统…', { running: true });
-  const r = await shRaw('cmd wifi force-country-code 2>&1; echo rc=$?');
+  const r = await shRaw('cmd wifi force-country-code disabled 2>&1; echo rc=$?');
   klog('info', '恢复自动：' + (r || '').trim().split('\n')[0]);
   await loadStatus();
   st('已恢复为系统自动判断', { ok: true });

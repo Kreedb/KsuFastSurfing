@@ -18,7 +18,7 @@ const src = fs.readFileSync(path.join(ROOT, 'module/webroot/diag.js'), 'utf8');
 const api = new Function('exec', src + `
   return { parseScan, parseLink, analyse, scoreChannels, chanOf, isDfs, uniiOf,
            rssiBand, b64bytes, parseNet, routeText, mergeHosts,
-           countHosts, setKV, parseCC, parseEcho, prefixToMask, parseAddr,
+           countHosts, parseCC, parseEcho, prefixToMask, parseAddr,
            parseRoutes };
 `)(async () => ({ stdout: '', stderr: '', errno: 0 }));
 
@@ -159,7 +159,7 @@ console.log('== full analysis ==');
     '  68:19:aa:bb:cc:05       5180    -67(0:-67/1:-72)    11.0    TR096CAB33        [RSN-PSK][ESS]\n' +
     '  68:19:aa:bb:cc:06       5300    -83(0:-83/1:-88)    10.0    TR82457E94        [RSN-PSK][ESS]\n';
   const link = api.parseLink('WifiInfo: SSID: "Limx-Guests", RSSI: -51, Link speed: 573Mbps, Frequency: 5180MHz, Wi-Fi standard: 11ax');
-  const net = { gateway: '192.168.1.1', loss: 0, rtt: 2.4, dns: 'ok' };
+  const net = { gateway: '192.168.1.1', dns: 'ok', latency: 128, lookupMs: 34 };
   const d = api.analyse(api.parseScan(scan), link, net);
 
   eq('total', d.summary.total, 6);
@@ -173,12 +173,14 @@ console.log('== full analysis ==');
   /* The link/L3 scalars must be carried through: they were dropped once and
      the network card showed "未获取" on a perfectly healthy link. */
   eq('gateway carried', d.gateway, '192.168.1.1');
-  eq('loss carried', d.loss, 0);
-  eq('rtt carried', d.rtt, 2.4);
+  eq('latency carried', d.latency, 128);
+  eq('resolver share carried', d.lookupMs, 34);
   eq('verdict dfs', d.verdict.dfs, 'ok');
 
-  /* No gateway must be distinguishable from a measured 0% loss. */
-  const d2 = api.analyse(api.parseScan(scan), link, { gateway: '', loss: null, rtt: null, dns: 'fail' });
+  /* No gateway must be distinguishable from "not measured", and the absence of
+     an outbound measurement must stay null rather than become 0 ms. */
+  const d2 = api.analyse(api.parseScan(scan), link,
+    { gateway: '', dns: 'fail', latency: null, lookupMs: null });
   /* Same name on two radios must stay two rows in one group, and the group
      must be anchored by its strongest member. The AP page used to dedupe to
      the strongest BSSID, which made a mesh look like a single radio. */
@@ -190,7 +192,7 @@ console.log('== full analysis ==');
   eq('secondary radio kept', d.groups.find(g => g.ssid === 'Li7E641E1C').bssids[1].bssid,
      '68:19:aa:bb:cc:03');
 
-  eq('no gateway is not 0% loss', d2.loss, null);
+  eq('no measurement is not 0 ms', d2.latency, null);
   eq('dns fail surfaces', d2.verdict.dns, 'fail');
 
   /* Every radio in the scan must survive grouping: losing one would hide a
@@ -215,7 +217,7 @@ console.log('== per-radio security ==');
 
   /* One name, two different security modes: the group header must not claim a
      single mode, so it renders each radio's own label. */
-  const d = api.analyse(rows, {}, { gateway: '', loss: null, rtt: null, dns: 'ok' });
+  const d = api.analyse(rows, {}, { gateway: '', dns: 'ok' });
   eq('mixed group radios', d.groups.find(g => g.ssid === 'Mixed').count, 2);
 }
 
@@ -246,9 +248,9 @@ console.log('== gateway behind a per-network table ==');
   const onlink = '192.168.1.0/24 dev wlan0 proto kernel scope link src 192.168.1.13\n';
   const got = '1.1.1.1 via 192.168.1.1 dev wlan0 table wlan0 src 192.168.1.13 uid 0\n';
   const merged = api.routeText(onlink, got);
-  const net = api.parseNet(merged, '3 packets transmitted, 3 received, 0% packet loss\nrtt min/avg/max/mdev = 2.1/3.4/5.0/0.4 ms\n', 'rc=0');
+  const net = api.parseNet(merged, '', {});
   eq('gateway recovered from ip route get', net.gateway, '192.168.1.1');
-  eq('iface recovered too', api.parseNet(merged, '', '').gateway, '192.168.1.1');
+  eq('iface recovered too', api.parseNet(merged, '', {}).gateway, '192.168.1.1');
   ok('the synthetic line is a real default', /^default via 192\.168\.1\.1 dev wlan0$/m.test(merged), merged);
 
   /* A table that already has a default is passed through untouched. */
@@ -273,6 +275,28 @@ console.log('== outbound echo page ==');
   eq('client ip', e.client, '39.96.19.125');
   eq('resolver ip', e.dns, '39.103.26.229');
   eq('verdict', e.verdict, 'ok');
+  eq('the client area is kept', e.clientArea, '北京市');
+
+  /* The production page carries a full attribution on the same line as the
+     address. The area must travel with its own address and not leak into the
+     other row: "广东省深圳市电信" after the IP is not the DNS city. */
+  const full = api.parseEcho(
+    '您好，尊敬的网易用户<br>您的IP地址信息: 202.105.122.210 广东省深圳市电信<br>' +
+    '您的DNS地址信息: 219.128.133.2 广东省汕头市电信<br>您的DNS设置正确');
+  eq('client ip with area', full.client, '202.105.122.210');
+  eq('client area', full.clientArea, '广东省深圳市电信');
+  eq('resolver ip with area', full.dns, '219.128.133.2');
+  eq('resolver area', full.dnsArea, '广东省汕头市电信');
+  eq('correct verdict', full.verdict, 'ok');
+
+  /* Overseas egress: the area is not a Chinese province, and the sentence is
+     "DNS设置可能存在问题，请联系您的ISP服务商". That must read as a finding. */
+  const overseas = api.parseEcho(
+    '您好，尊敬的网易用户<br>您的IP地址信息: 108.181.24.43 加利福尼亚州洛杉矶Psychz Networks<br>' +
+    '您的DNS地址信息: 219.128.133.2 广东省汕头市电信<br>' +
+    '您的DNS设置可能存在问题，请联系您的ISP服务商');
+  eq('overseas area', overseas.clientArea, '加利福尼亚州洛杉矶Psychz Networks');
+  eq('the soft warning is a finding', overseas.verdict, 'bad');
 
   /* A wrong-resolver page must not read as success. */
   const bad = api.parseEcho('您的IP地址信息: 1.2.3.4<br>您的DNS地址信息: 5.6.7.8<br>您的DNS设置错误');
@@ -336,7 +360,7 @@ console.log('== freshness ==');
     '  aa:00:00:00:00:01  5180  -50  2.0   A  [RSN-PSK]\n' +
     '  aa:00:00:00:00:02  2437  -70  9.0   B  [RSN-PSK]\n' +
     '  aa:00:00:00:00:03  5745  -60  300.0 C  [RSN-PSK]\n';
-  const d = api.analyse(api.parseScan(scan), {}, { gateway: '', loss: null, rtt: null, dns: 'ok' });
+  const d = api.analyse(api.parseScan(scan), {}, { gateway: '', dns: 'ok' });
   /* The median is what the UI shows: a 300-second neighbour must not drag the
      whole cache "freshness" down to five minutes, which is why the max was
      useless for telling whether a rescan landed. */

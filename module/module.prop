@@ -1,6 +1,6 @@
 id=KsuFastSurfing
 name=KsuFastSurfing
-version=v2.2
-versionCode=8
+version=v2.3
+versionCode=9
 author=Kreedb
-description=WebUI-only WiFi diagnostics (channel / interference / DFS / gateway loss / outbound IP and DNS), editable hosts with a DNS burst resolver, and a configurable Wi-Fi country code. No background scripts. Systemless.
+description=WebUI-only WiFi diagnostics: channel and interference ranking, DFS visibility, link and route state, editable hosts, and one end-to-end outbound check that reports latency, egress IP and resolver with their attribution. Country code is applied through `cmd wifi force-country-code`. No background scripts. Systemless.

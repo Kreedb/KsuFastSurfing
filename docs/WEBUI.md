@@ -74,42 +74,49 @@ st('就绪 · <MODDIR>')
 |---|---|
 | 编辑框 | `base64 -w0 <mod>/user-hosts` |
 | 条目数 / 挂载 | `base64 -w0 <mod>/hosts`、`base64 -w0 /system/etc/hosts`、`mount \| grep ' /system/etc/hosts '` |
-| 国家码配置 | `base64 -w0 <mod>/config` |
 | 当前国家码 | `cmd wifi get-country-code`，失败回退 `dumpsys wifi` |
 | 扫描 | `cmd wifi list-scan-results` |
 | 链路 | `cmd wifi status` |
 | 网关 / 路由表 | `ip route`（无 default 时补 `ip route get 1.1.1.1`） |
 | 本机地址 / 掩码 | `ip addr show dev <if>`，前缀长度转点分掩码 |
-| 网关延迟 | `ping -c 3 -i 0.2 -W 1 <gw>` |
-| 出口 IP / DNS | `curl -sS --compressed -m 6 https://only-983810-58-250-251-51.nstool.laiqukankan.com/` |
+| 外网延迟 / 出口 IP / DNS | `curl -sS --compressed -m 8 -w '<trailer>' https://only-<32位随机>.nstool.laiqukankan.com/` |
 
 启动时不发起任何探测或扫描。
 
 ## 出网检查
 
-原来的 `ping github.com` 只能回答“通不通”。现在换成一次 HTTPS GET 打到一个回显页，
-一次请求同时回答三件事：
+一次 HTTPS GET 打到一个回显页，同时回答四件事：
 
 | 字段 | 来源 |
 |---|---|
-| 出口 IP | 页面回显的客户端地址 |
-| 出口 DNS | 页面观察到的递归解析器地址 |
-| DNS 判定 | 页面的结论句（`DNS设置正确` / `DNS设置错误`） |
+| 外网延迟 | `curl -w '%{time_total}'`，完整往返（DNS + TCP + TLS + 首字节） |
+| 解析耗时 | 同一个 `-w` 里的 `%{time_namelookup}`，单独展示 |
+| 出口 IP / DNS | 页面回显的客户端地址与递归解析器地址，各自带上归属地 |
+| DNS 判定 | 页面的结论句（`DNS设置正确` / `DNS设置可能存在问题，请联系您的ISP服务商`） |
+
+归属地就是地址后面那段文字（`广东省深圳市电信`），按行切分后跟各自的地址走，
+不会把 IP 城市的名字串到 DNS 那一行。没有标签的老页面回退到“正文里前两个地址”，
+此时归属地留空而不是随便配一个。
+
+这一条请求取代了原来的“丢包 + 网关 RTT”：那两项只测第一跳，网关永远 1–3 ms 不丢包，
+ISP 出口坏了也看不出来。
 
 主机名是**泛域名**：`only-<random>.nstool.laiqukankan.com/` 中的随机段每次打开页面
 重新生成 32 位小写字母数字，只用于隔离这一次探测，不留任何设备标识（也无需 localStorage）。
 
 该站点 `content-type` 声明 **GBK**，所以响应按 GBK 解码后再匹配中文标签；
 用 UTF-8 解会得到乱码，标签永远匹配不上。地址同时按标签和形状匹配，
-标签随部署变化时仍能取到。请求带 `-m 6`，握手卡住也不会拖住页面。
+标签随部署变化时仍能取到。请求带 `-m 8`，握手卡住也不会拖住页面。
+计时 trailer 用 `\n@@T ` 前缀贴在正文后面，解析前先切掉，
+否则那几个数字会被当成“页面上出现的某个地址”。
 
 ## 一次采集
 
 `measure()` 依次执行上述命令，`parseScan` / `parseLink` / `parseNet` 各自解析；
 `analyse()` 汇总。缺一段时对应字段为“未获取”，不阻塞其他区块渲染。
 
-命令之间没有固定等待：网关 ping 最多 3 包，DNS 只 1 包。脱敏的 BSSID 原样显示，
-页面不会为还原它额外发任何命令。
+扫描表与地址查询串行、出网请求与地址查询并行，命令之间没有固定等待。
+脱敏的 BSSID 原样显示，页面不会为还原它额外发任何命令。
 
 ## 状态条
 
@@ -135,7 +142,7 @@ st(text, {warn: true})   // 警告
 
 | 选项卡 | 主要元素 | 数据来源 |
 |---|---|---|
-| 概览 | 链路、周边计数、全信道干扰表、本机地址 / 网关 / 掩码 / 丢包 / 出口 IP / 出口 DNS、路由表、按信号排序的 AP 列表、UNII 分带 | `measure()` |
+| 概览 | 链路、周边计数、全信道干扰表、本机地址 / 网关 / 掩码 / 外网延迟 / 出口 IP 与 DNS、路由表、按信号排序的 AP 列表、UNII 分带 | `measure()` |
 | 网络配置 | hosts 状态、只读视图 + 折叠编辑框、保存按钮、国家码 | 读文件 + `h-save` / `c-set` handler |
 | 控制台 | 命令、退出码、耗时、输出摘要 | `exec()` |
 
@@ -201,16 +208,16 @@ root shell 不在其列。连发三次、关扫描节流、`scan-always-availabl
 
 ```
 应用
-  ├─ 读 config → setKV(CC)
-  ├─ 写 config / system.prop（4 个键）
-  ├─ resetprop -n（4 个键）
   ├─ cmd wifi force-country-code enabled XX，退避 0/300/600/1200ms
-  ├─ iw reg set XX（有 iw 才做）
-  └─ countryCodeNow() 读回
+  └─ countryCodeNow() 读回校验
 
 恢复自动
   └─ cmd wifi force-country-code disabled
 ```
+
+只有这一条写路径。不写属性、不写配置文件、不碰 `iw`。命令退出 0 不算成功：
+框架在芯片不支持某个码时会静默保留旧值，所以必须 `get-country-code` 读回来比。
+重启后框架回到系统判断，需要在页面上再点一次。
 
 ## 打包
 
@@ -228,7 +235,8 @@ root shell 不在其列。连发三次、关扫描节流、`scan-always-availabl
 - 控制台记录了命令、退出码与耗时
 - 页面没有发出任何 `.sh` 命令
 - 保存时一次写入 user-hosts + 两份 hosts + 挂载
-- 国家码写入 config / system.prop 并调用 resetprop + `cmd wifi`
+- 国家码只调用 `cmd wifi force-country-code`，不写文件也不注属性
+- 读回值不一致时报告失败，而不是沿用退出码
 - 页面不发出任何扫描命令
 - 中文 SSID 穿过桥接不变乱码
 - 失败可见，不静默

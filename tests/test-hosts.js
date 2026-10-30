@@ -21,7 +21,7 @@ const ROOT = path.resolve(__dirname, '..');
 const src = fs.readFileSync(path.join(ROOT, 'module/webroot/diag.js'), 'utf8');
 
 const api = new Function('exec', src + `
-  return { mergeHosts, countHosts, setKV, parseCC };
+  return { mergeHosts, countHosts, parseCC };
 `)(async () => ({ stdout: '', stderr: '', errno: 0 }));
 
 let failures = 0;
@@ -101,16 +101,6 @@ console.log('== separators ==');
   const m = api.mergeHosts('1.1.1.1   one.example\n1.1.1.1\tone.example\n2.2.2.2\t two.example \n', WHEN);
   eq('dedup across tabs and spaces', body(m).filter(l => /example/.test(l)),
      ['1.1.1.1\tone.example', '2.2.2.2\ttwo.example']);
-}
-
-/* ---------- 7. config key replacement ---------- */
-console.log('== setKV ==');
-{
-  eq('replace existing', api.setKV('CC=US\nFOO=1\n', 'CC', 'JP'), 'CC=JP\nFOO=1\n');
-  eq('append missing', api.setKV('FOO=1\n', 'CC', 'JP'), 'FOO=1\nCC=JP\n');
-  eq('empty config', api.setKV('', 'CC', 'DE'), 'CC=DE\n');
-  eq('does not touch a prefix match', api.setKV('PROBE_TIMEOUT=3\n', 'CC', 'DE'),
-     'PROBE_TIMEOUT=3\nCC=DE\n');
 }
 
 /* ---------- 8. country-code wording across OEMs ---------- */

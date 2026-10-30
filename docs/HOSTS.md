@@ -65,11 +65,8 @@ loadStatus() 读回
 
 ## 配置
 
-`module/config` 只有国家码：
-
-```
-CC=US
-```
+模块没有运行配置文件。国家码是框架的运行时状态（`cmd wifi force-country-code`），
+不落到任何文件里。
 
 `module/domains` 已不再被读取，保留只为兼容旧版本；可以安全删除。
 

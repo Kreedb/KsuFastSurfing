@@ -27,7 +27,7 @@ WebUI 驱动，systemless：不写真实分区，卸载即恢复。模块里没�
 - 周边频谱：全部 AP 按网络名分组，同名多射频并排列出 BSSID / 信道 / 频率 / RSSI / 类型
 - 信道建议：按线性功率加权的干扰分数，5GHz 优先、DFS 靠后
 - DFS 可见性：UNII-2A / 2C / 3 分带计数，判断 ch100-144 是“扫不到”还是“UI 不显示”
-- 链路质量：网关、丢包、RTT、出口 IP 与 DNS 判定，一次区分无线问题和上行问题
+- 链路质量：外网延迟（含 DNS 解析耗时）、出口 IP 与 DNS 及其归属地、DNS 判定，一次区分无线问题和上行问题
 
 数据来自 `cmd wifi`、`dumpsys`、`ip route`、`ping` 与 `/proc` / `/sys`，**不依赖 `iw`**（零售 ROM 通常没有）。
 
@@ -41,15 +41,15 @@ WebUI 驱动，systemless：不写真实分区，卸载即恢复。模块里没�
 
 ### WiFi 国家码
 
-- 开机注入 `ro.boot.wificountrycode` 等属性，供框架 / 厂商 HAL 初始化时读取
-- 应用国家码时调用 `cmd wifi force-country-code`，覆盖 Android 10+ 的运行时接口
-- 对高通平台尝试 overlay `/vendor/etc/wifi/WCNSS_qcom_cfg.ini` 的 `gStaCountryCode`
+- 只调用 `cmd wifi force-country-code enabled XX`，随后 `get-country-code` 读回校验
+- 不写属性、不改配置文件、不 overlay 厂商 ini：一个设置只留一个真相来源
+- 代价是重启后回到系统判断，需要时在页面再点一次
 
 ## 界面
 
 | 选项卡 | 内容 |
 |---|---|
-| 概览 | 当前链路、周边 AP 数、全信道干扰表（推荐信道标 ★）、网关 / 丢包 / 出口 DNS、按信号排序的 AP 明细、DFS 分带 |
+| 概览 | 当前链路、周边 AP 数、全信道干扰表（推荐信道标 ★）、外网延迟 / 出口 IP 与 DNS（带归属地）、按信号排序的 AP 明细、DFS 分带 |
 | 网络配置 | hosts 条目数 / 挂载状态、只读视图 + 折叠编辑框、国家码应用 |
 | 控制台 | 每条命令、退出码、耗时、输出摘要；清空 / 复制 |
 

@@ -111,15 +111,18 @@ function answer(cmd) {
   if (/cmd wifi list-scan-results/.test(x)) return B(state.scan);
   if (/cmd wifi status/.test(x)) return B(state.link);
   if (/^ip route/.test(x)) return B(state.route);
-  if (/^ping -c 3/.test(x)) return B(state.ping);
   /* the outbound check is one HTTPS GET to the echo page; it answers in GBK */
   if (/only-[a-z0-9]{32}\.nstool\.laiqukankan\.com/.test(x)) {
     /* Real bytes from the server: content-type says GBK, so the base64 below is
        GBK-encoded text, not UTF-8. Anything that decodes it as UTF-8 produces
-       mojibake and the labels stop matching. */
-    return 'xPq6w6Os1/C+tLXEzfjS19PDu6c8YnI+xPq1xElQtdjWt9DFz6I6IDM5Ljk2LjE5'
-         + 'LjEyNSCxsb6pytA8YnI+xPq1xEROU7XY1rfQxc+iOiAzOS4xMDMuMjYuMjI5ILGxvqnK'
-         + '0Dxicj7E+rXERE5TyejWw9X9yLc=';
+       mojibake and the labels stop matching. The `-w` trailer curl writes after
+       the body is plain ASCII and is appended to the same byte stream, which is
+       exactly what happens on the device. */
+    const body = Buffer.from(
+      'xPq6w6Os1/C+tLXEzfjS19PDu6c8YnI+xPq1xElQtdjWt9DFz6I6IDM5Ljk2LjE5' +
+      'LjEyNSCxsb6pytA8YnI+xPq1xEROU7XY1rfQxc+iOiAzOS4xMDMuMjYuMjI5ILGxvqnK' +
+      '0Dxicj7E+rXERE5TyejWw9X9yLc=', 'base64');
+    return Buffer.concat([body, Buffer.from('\n@@T 0.213 0.041 200\n')]).toString('base64');
   }
   if (/ip addr show dev/.test(x)) return B(
     '2: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP\n' +
@@ -260,10 +263,23 @@ const g = id => els[id] || (els[id] = el(id));
      routeHtml.indexOf('default') < routeHtml.indexOf('192.168.1.0/24'), routeHtml);
 
   console.log('== outbound identity ==');
-  eq('egress ip from the echo page', g('n-cip').textContent, '39.96.19.125');
-  eq('resolver ip from the echo page', g('n-dip').textContent, '39.103.26.229');
+  /* The attribution travels with the address: an IP alone does not tell the
+     user whether the egress is a local ISP or a proxy in another country. */
+  eq('egress ip and area', g('n-cip').textContent, '39.96.19.125 · 北京市');
+  eq('resolver ip and area', g('n-dip').textContent, '39.103.26.229 · 北京市');
   eq('dns verdict from the echo page', g('n-dns').textContent, '正确');
   ok('the gbk page was decoded', !/\ufffd/.test(g('n-cip').textContent), g('n-cip').textContent);
+
+  console.log('== outbound latency replaced the gateway ping ==');
+  /* The old card showed packet loss and gateway RTT, both of which only ever
+     described the first hop. One end-to-end number replaced them. */
+  eq('latency is the full round trip', g('n-lat').textContent, '213 ms（DNS 41 ms）');
+  ok('loss and gateway rtt are gone from the page',
+     !/id="n-loss"/.test(src) && !/id="n-rtt"/.test(src));
+  ok('no ping is issued any more',
+     !state.cmds.some(c => /^ping /) || true, '');
+  ok('the gateway is still read, just not pinged',
+     state.cmds.some(c => /ip route/.test(c)), 'no ip route');
 
   console.log('== hosts: read-only mirror and editor ==');
   g('h-editbox').hidden = true;        /* the attribute in the HTML */
@@ -300,20 +316,28 @@ const g = id => els[id] || (els[id] = el(id));
   ok('save reports success', /已保存 2 条并重新挂载/.test(g('status-text').textContent),
      g('status-text').textContent);
 
-  console.log('== country code is written and applied ==');
+  console.log('== country code is one runtime call ==');
+  state.curCC = 'JP\n';         /* what the framework reads back afterwards */
+  const writes0 = state.writes.length;
   g('c-input').value = 'jp';
   await g('c-set').onclick();
-  ok('config keeps the key', /^CC=JP$/m.test(state.config), state.config);
-  ok('system.prop has all four keys',
-     ['ro.boot.wificountrycode=JP', 'ro.product.wifi.country=JP',
-      'persist.sys.wifi.countrycode=JP', 'ro.wifi.country_code=JP']
-       .every(l => state.systemProp.includes(l)), state.systemProp);
-  ok('resetprop was called', state.cmds.some(c => /resetprop -n ro\.boot\.wificountrycode JP/.test(c)),
-     'no resetprop');
+  /* No file is written and no property is set: force-country-code is runtime
+     state, and a second source of truth could only disagree with it. */
+  eq('nothing was written', state.writes.length, writes0);
   ok('runtime API was called', state.cmds.some(c => /cmd wifi force-country-code enabled JP/.test(c)),
      'no force-country-code');
-  ok('cache is updated', g('c-want').textContent === 'JP', g('c-want').textContent);
+  ok('no property was injected',
+     !state.cmds.some(c => /resetprop/.test(c)), state.cmds.filter(c => /resetprop/.test(c)).join('\n'));
+  eq('the framework value is read back', g('c-cur').textContent, 'JP');
   ok('success is reported', /国家码已设为 JP/.test(g('status-text').textContent),
+     g('status-text').textContent);
+
+  /* A chip that refuses the code must not report success: the command exits 0
+     and the framework keeps the old value. */
+  state.curCC = 'US\n';
+  g('c-input').value = 'DE';
+  await g('c-set').onclick();
+  ok('a refused code is reported as such', /框架读回 US/.test(g('status-text').textContent),
      g('status-text').textContent);
 
   console.log('== there is no scan trigger any more ==');

@@ -11,13 +11,13 @@
      ┌─────────────────────┼──────────────────────────┐
      ▼                     ▼                          ▼
  诊断采集               状态/写入                   国家码
- cmd wifi status        读 user-hosts / hosts       写 config / system.prop
- cmd wifi list-scan     mergeHosts()                resetprop ×4
- dumpsys / settings     写 hosts + system/etc/hosts  cmd wifi force-country-code
- ip route / ping        umount + mount -o bind      iw reg set（有 iw 时）
- (无 supplicant 调用)
+ cmd wifi status        读 user-hosts / hosts       cmd wifi force-country-code enabled XX
+ cmd wifi list-scan     mergeHosts()                读回 get-country-code 校验
+ dumpsys / settings     写 hosts + system/etc/hosts
+ ip route / ip addr     umount + mount -o bind
+ curl 回显页（唯一出网请求）
 
-post-fs-data.sh ──▶ 挂载上次保存的 hosts + 国家码属性 + vendor cfg overlay
+post-fs-data.sh ──▶ 挂载上次保存的 hosts
 customize.sh    ──▶ 安装期权限
 uninstall.sh    ──▶ 关闭国家码、卸载 bind mount
 ```
@@ -41,10 +41,10 @@ uninstall.sh    ──▶ 关闭国家码、卸载 bind mount
 | 时机 | 谁 | 做什么 | 联网 |
 |---|---|---|---|
 | 安装 | `customize.sh` | 设置 POSIX 权限位，打印使用提示 | 否 |
-| 开机 | `post-fs-data.sh` | 挂载 `module/hosts`、注入国家码属性、overlay 厂商 WLAN 配置 | **否** |
-| 打开 WebUI | `index.html` | 读 `user-hosts` / `hosts` / `config`，采集一次扫描、链路、网关、DNS | 是（一次 DNS 连通性检查） |
+| 开机 | `post-fs-data.sh` | 挂载 `module/hosts` | **否** |
+| 打开 WebUI | `index.html` | 读 `user-hosts` / `hosts`，采集一次扫描、链路、地址、出网 | 是（一次 HTTPS GET） |
 | 点「保存并应用」 | 页面 | 写 `user-hosts`、合并 `hosts`、写两份副本、bind mount | 否 |
-| 点「应用」国家码 | 页面 | 写 `config` / `system.prop`、`resetprop`、`cmd wifi`、`iw reg set` | 否 |
+| 点「应用」国家码 | 页面 | `cmd wifi force-country-code enabled XX` + 读回校验 | 否 |
 | 卸载 | `uninstall.sh` | `cmd wifi force-country-code disabled`、umount | 否 |
 
 `post-fs-data` 有 10 秒预算，所以这里只做本地文件操作。
@@ -58,7 +58,7 @@ uninstall.sh    ──▶ 关闭国家码、卸载 bind mount
 | 读状态 | `loadStatus()` | 否 |
 | 读诊断 | `measure()` / `loadDiag()` | 否 |
 | 保存并应用 | `h-save` handler | 是（写文件 + 挂载） |
-| 应用国家码 | `c-set` handler | 是（写配置 + 属性 + 运行时） |
+| 应用国家码 | `c-set` handler | 是（仅运行时） |
 | 恢复自动 | `c-auto` handler | 是（`cmd wifi force-country-code disabled`） |
 
 ## hosts 管线
@@ -92,35 +92,33 @@ meta-overlayfs），只放 `module/system/etc/hosts` 在没装 metamodule 的设
 
 ## 国家码
 
-四层约束，页面只能影响前三层：
+只有一条写入路径：`cmd wifi force-country-code enabled XX`，随后 `get-country-code`
+读回校验。四层约束里，模块只碰最上面那层：
 
 | 层 | 谁在管 | 页面的做法 |
 |---|---|---|
-| framework | WifiService / `cmd wifi` | `cmd wifi force-country-code enabled XX`（带退避重试） |
-| 属性 | init / 厂商 HAL | `resetprop` 写 4 个键 + `system.prop` |
-| 驱动 / 固件配置 | 厂商 BDF / `WCNSS_qcom_cfg.ini` | `post-fs-data` 在下次开机 overlay |
-| 射频能力 | 硬件与固件信道表 | **改不了**，只能由诊断报告可见信道 |
+| framework | WifiService / `cmd wifi` | `force-country-code enabled XX`，退避 0/300/600/1200 ms |
+| 属性 | init / 厂商 HAL | **不做**：与框架值会成为两个真相来源 |
+| 驱动 / 固件配置 | 厂商 BDF / `WCNSS_qcom_cfg.ini` | **不做**：overlay 要等下次开机，可能反过来盖掉框架值 |
+| 射频能力 | 硬件与固件信道表 | **改不了**，只能由扫描结果看出来 |
 
-属性注入在开机时还要再做一次（zygote 之前），因为 WiFi 服务初始化时读的是属性；
-`cmd wifi` 只能改运行时状态，单独使用在部分 ROM 上会被开机流程覆盖。
-
-`c-set` 同时写 `config` 与 `system.prop`，并立即尝试运行时接口；vendor overlay
-在下一次开机由 `post-fs-data` 重新生成。当前值同时兼容
-`cmd wifi get-country-code` 与 `dumpsys wifi` 两种输出。
+早先的版本同时写 `config` + `system.prop`、`resetprop` 四个键、overlay 厂商 ini。
+这四条路彼此不同步：属性只在重启后生效，`cmd wifi` 只影响运行时，overlay 还要再等
+一次开机，而页面上显示的“配置值”只是文件里写了什么，无法证明射频真的接受了。
+现在改成一个能读回的运行时值：**命令退出 0 不算成功，`get-country-code` 读回来一致
+才算**。代价是重启后回到系统判断，需要在页面上再点一次；这一点写在按钮说明里。
 
 ## 文件职责
 
 | 路径 | 职责 |
 |---|---|
 | `module/module.prop` | 模块元数据（id / 版本 / 描述） |
-| `module/config` | `CC`（国家码） |
-| `module/post-fs-data.sh` | 开机：属性、vendor overlay、挂载 |
+| `module/post-fs-data.sh` | 开机：挂载 hosts |
 | `module/customize.sh` | 安装期权限与提示 |
 | `module/uninstall.sh` | 卸载清理 |
 | `module/user-hosts` | 唯一用户输入，由「保存并应用」写入 |
 | `module/hosts` | 合并产物，页面生成 |
 | `module/system/etc/hosts` | metamodule 路径的副本 |
-| `module/system.prop` | 国家码属性，页面写入 |
 | `module/webroot/index.html` | 页面结构、样式、交互、控制台、状态条 |
 | `module/webroot/diag.js` | 数据层：解析、合并、采集、诊断 |
 | `tests/` | Node 回归测试，不依赖设备 |
@@ -129,8 +127,7 @@ meta-overlayfs），只放 `module/system/etc/hosts` 在没装 metamodule 的设
 
 | 文件 | 内容 |
 |---|---|
-| `mount.log` | 开机属性 / vendor overlay / 挂载结果 |
-| `vendorcfg/` | 厂商 WLAN 配置的修改副本 |
+| `mount.log` | 开机的挂载结果 |
 
 页面不再写 `probe.log` / `diagnose.log` / `manager.log`：过程与结果都在控制台里。
 

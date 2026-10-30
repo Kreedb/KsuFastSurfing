@@ -78,7 +78,7 @@ node tests/test-diag.js        # 也可以单独跑某一份
 - 检测只追加、不写文件
 - 已有域名不被覆盖
 - 保存时写 user-hosts、两份 hosts，并执行 bind mount
-- 国家码写入 config / system.prop，调用 resetprop 与 `cmd wifi`
+- 国家码只调用 `cmd wifi force-country-code`，随后读回校验，不写文件
 - 页面不请求扫描，只读系统缓存
 - 中文 SSID 穿过 base64 桥接不变乱码
 - 诊断报告包含 framework 与 UNII 计数
@@ -168,7 +168,7 @@ CI 里不再有第二份检查清单——以前两边各写一遍，改一边�
 ## 版本与兼容
 
 - 模块元数据：`module/module.prop`
-- 运行配置：`module/config`（只有 `CC`）
+- 运行配置：无（国家码是框架运行时状态，不落盘）
 - 页面与数据层：`module/webroot/`
 - 新增生命周期文件要同时改：`customize.sh` 权限表、`build.sh` 的 `EXEC` 集合
   （CI 复用同一份 `build.sh`，不需要再改第二处）

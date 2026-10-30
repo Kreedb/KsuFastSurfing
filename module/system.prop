@@ -1,4 +1,0 @@
-ro.boot.wificountrycode=US
-ro.product.wifi.country=US
-persist.sys.wifi.countrycode=US
-ro.wifi.country_code=US

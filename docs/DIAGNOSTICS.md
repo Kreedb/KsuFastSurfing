@@ -10,8 +10,7 @@
 | 链路 | `cmd wifi status` | 当前连接的 SSID、频率、速率、RSSI、标准 |
 | 路由 | `ip route`（无 default 时补 `ip route get 1.1.1.1`） | 默认网关、出口接口、路由表 |
 | 地址 | `ip addr show dev <if>` | 本机地址与子网掩码 |
-| 网关 | `ping -c 3 -i 0.2 -W 1 <网关>` | 丢包与平均 RTT |
-| 出网 | `curl -m 6` 访问回显页（GBK） | 出口 IP、出口 DNS、DNS 判定 |
+| 出网 | `curl -m 8 -w '<timing>'` 访问回显页（GBK） | 外网延迟、出口 IP/DNS 及其归属地、DNS 判定 |
 
 没有采集脚本，没有 `##section` 协议。命令的输出由 `parseScan` / `parseLink` /
 `parseNet` 直接解析，缺一段就显示“未获取”。
@@ -78,14 +77,21 @@ ch = f <= 2500 ? (f === 2484 ? 14 : floor((f - 2407) / 5))
 `cmd wifi status` 只有一行 `WifiInfo:`。字段逗号分隔，但 SSID 带引号，
 所以用 `SSID:\s*"([^"]*)"` 取，避免 SSID 里的逗号把字段切断。
 
-`parseNet` 是纯函数，输入是已经采集好的 route / ping / dns 三段：
+`parseNet` 是纯函数，输入是已经采集好的 route / addr / echo 三段：
 
 - 网关：`default via <ip>`；没有默认路由时为空，不猜
-- 丢包：`N% packet loss`
-- RTT：`rtt ... = min/avg/max` 取 **avg**，不是 max
-- DNS：`rc=0` 为正常，非 0 为失败，缺段为未知
+- 延迟：`curl -w '%{time_total}'`，取一次真实往返（DNS + TCP + TLS + 首字节）
+- 解析耗时：同一行的 `%{time_namelookup}`，单独展示，用来区分“解析慢”与“链路慢”
+- 出口 IP / DNS 及其归属地：从回显页正文抽取
+- DNS 判定：`DNS设置正确` 为 ok；`DNS设置(可能)存在…问题` 为 bad；缺段为 unknown
 
-三段独立解析，所以 ping 失败不会把网关清空，网关缺失也不会显示成 0% 丢包。
+三段独立解析，所以回显页失败不会把网关清空，网关缺失也不会把延迟显示成 0。
+
+### 为什么去掉丢包与网关 RTT
+
+这两项只描述**第一跳**。网关几乎总是 1–3 ms 且不丢包，即使 ISP 出口已经瘫了；
+反过来，ICMP 被网关限速时又会报出一片假的丢包。一次 HTTPS 往返既是可达性判断，
+也是用户真正感受到的数字，且和出口 IP / DNS 判定共用同一次请求，不增加任何开销。
 
 ## 信道模型
 
@@ -179,9 +185,9 @@ ch100-144 属 **UNII-2C（5470-5725 MHz）**，在美国与 UNII-2A（52-64）�
 
 | 层 | 谁在管 | 能否从 root 改 |
 |---|---|---|
-| framework | WifiService / `cmd wifi` | 能（本模块已做） |
-| kernel regdb | cfg80211 / `iw reg set` | 能（本模块已做，常被厂商驱动忽略） |
-| 驱动 / 固件 | 厂商 BDF / `WCNSS_qcom_cfg.ini` | 部分能（本模块尝试 overlay） |
+| framework | WifiService / `cmd wifi force-country-code` | 能（本模块唯一的写入路径） |
+| kernel regdb | cfg80211 | 未做：零售 ROM 通常没有 `iw` |
+| 驱动 / 固件 | 厂商 BDF / `WCNSS_qcom_cfg.ini` | 未做：overlay 要等下次开机，且与框架值可能打架 |
 | 射频能力 | 硬件与固件实际支持的信道表 | **不能** |
 
 ### 「扫到 ch100」≠「设置里能看到 ch100」

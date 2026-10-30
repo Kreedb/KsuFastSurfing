@@ -41,7 +41,7 @@ Android 原生命令，模块里只剩三个生命周期钩子。
 
 ```
 post-fs-data.sh
-  ├─ resetprop 写 4 个国家码属性
+  ├─ （不再注入属性）
   ├─ overlay vendor WCNSS_qcom_cfg.ini（高通机型，文件存在才做）
   └─ bind mount module/hosts → /system/etc/hosts、/etc/hosts
 ```
@@ -66,8 +66,8 @@ post-fs-data.sh
 
 ```
 measure()
-  cmd wifi list-scan-results / cmd wifi status / ip route
-  ping 网关 / curl 回显页（出口 IP + DNS）
+  cmd wifi list-scan-results / cmd wifi status / ip route / ip addr
+  curl 回显页（-w 计时 + 出口 IP/DNS 与归属地 + DNS 判定）
        ↓
 parseScan / parseLink / parseNet → analyse() → render()
 ```
@@ -79,11 +79,8 @@ BSSID 被框架脱敏时原样显示，不做还原。
 
 ```
 c-set
-  setKV(config, CC) + system.prop（4 键）
-  resetprop -n（4 键）
   cmd wifi force-country-code enabled XX（退避 0/300/600/1200ms）
-  iw reg set XX（有 iw 才做）
-  countryCodeNow() 读回
+  countryCodeNow() 读回校验（退出 0 不算成功，读回一致才算）
 ```
 
 ## v2.2 改动
@@ -101,6 +98,14 @@ c-set
   下方新增路由表卡片；出网检查由 `ping github.com` 换成 HTTPS GET 回显页
 - hosts 页：默认显示设备上实际生效的只读 hosts，点「编辑」才展开 `user-hosts`
 - 国家码并入网络配置页，5GHz 可用性与详细输出面板删除
+- 「链路与网络」去掉丢包与网关 RTT，改为一次 HTTPS 往返的外网延迟（括号内为其中
+  DNS 解析耗时）；出口 IP / DNS 带归属地（`广东省深圳市电信`）
+
+**国家码只剩一条写路径**
+- 只调 `cmd wifi force-country-code enabled XX`，并用 `get-country-code` 读回校验
+- 删除 `module/config`、`module/system.prop`、`resetprop` 四连、`iw reg set`、
+  `post-fs-data` 里的 vendor `WCNSS_qcom_cfg.ini` overlay
+- 代价：重启后回到系统值，需要在页面再点一次（按钮说明里写了）
 
 **移除**
 - 扫描触发（`cmd wifi start-scan` 在目标机型上被 `ScanRequestProxy` 静默丢弃，
